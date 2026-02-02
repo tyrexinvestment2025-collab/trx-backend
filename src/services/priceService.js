@@ -1,59 +1,55 @@
 const axios = require('axios');
 
 let cachedPrice = {
-  usd: 97000, // Актуальная примерная цена
+  usd: 97000, // Примерная цена
   lastUpdated: null
 };
 
-// Список API источников в порядке приоритета
-// Binance обычно самый надежный и не банит IP так часто, как CoinGecko
+// Новые источники, отобранные специально для серверов в США и Shared Hosting
 const sources = [
   {
-    name: 'Binance',
-    url: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
-    extract: (data) => parseFloat(data.price)
+    name: 'Coinbase',
+    url: 'https://api.coinbase.com/v2/prices/BTC-USD/spot',
+    extract: (data) => parseFloat(data.data.amount)
   },
   {
-    name: 'CoinGecko',
-    url: 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
-    extract: (data) => data.bitcoin.usd
+    name: 'Blockchain.info',
+    url: 'https://blockchain.info/ticker',
+    extract: (data) => data.USD.last
   },
   {
-    name: 'CoinDesk',
-    url: 'https://api.coindesk.com/v1/bpi/currentprice/USD.json',
-    extract: (data) => data.bpi.USD.rate_float
+    name: 'CoinCap',
+    url: 'https://api.coincap.io/v2/assets/bitcoin',
+    extract: (data) => parseFloat(data.data.priceUsd)
+  },
+  {
+    name: 'KuCoin', // Тоже часто работает, запасной вариант
+    url: 'https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT',
+    extract: (data) => parseFloat(data.data.last)
   }
 ];
 
 const updateBitcoinPrice = async () => {
-  // Пробуем источники по очереди
   for (const source of sources) {
     try {
-      console.log(`[PriceService] Trying to fetch from ${source.name}...`);
+      // Таймаут 4 секунды, чтобы не висеть долго, если сайт тупит
+      const response = await axios.get(source.url, { timeout: 4000 });
       
-      const response = await axios.get(source.url, {
-        // Добавляем заголовок User-Agent, чтобы притвориться браузером (помогает от простых блокировок)
-        headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' 
-        },
-        timeout: 5000 // Ждем не больше 5 секунд
-      });
-
       const price = source.extract(response.data);
 
       if (price && !isNaN(price)) {
         cachedPrice.usd = price;
         cachedPrice.lastUpdated = new Date();
-        console.log(`[PriceService] Success! Bitcoin price updated from ${source.name}: $${cachedPrice.usd}`);
-        return; // Если успешно получили цену, выходим из функции, остальные источники не трогаем
+        console.log(`[PriceService] Success! Updated from ${source.name}: $${cachedPrice.usd}`);
+        return; // Успех - выходим
       }
     } catch (error) {
-      console.warn(`[PriceService] Failed to fetch from ${source.name}: ${error.message}`);
-      // Если ошибка — цикл продолжится и попробует следующий источник
+      // Логируем коротко, чтобы не засорять консоль
+      const status = error.response ? error.response.status : error.code;
+      console.warn(`[PriceService] Failed ${source.name} (${status})`);
     }
   }
-
-  console.error('[PriceService] All sources failed. Using old cached price.');
+  console.error('[PriceService] All sources failed. Keeping old price.');
 };
 
 const getBitcoinPrice = () => {
@@ -61,13 +57,14 @@ const getBitcoinPrice = () => {
 };
 
 const startPriceUpdater = () => {
+  // Первый запуск сразу
   updateBitcoinPrice();
-
-  // Обновляем раз в 5 минут (Binance позволяет часто, это безопасно)
-  // 5 * 60 * 1000 = 300000
+  
+  // Обновляем раз в 5 минут (300000 мс)
+  // Coinbase не любит запросы чаще раза в минуту с одного IP, так что 5 минут — безопасно
   setInterval(updateBitcoinPrice, 300000);
   
-  console.log('[PriceService] Multi-source price updater started.');
+  console.log('[PriceService] Robust US-friendly price updater started.');
 };
 
 module.exports = {

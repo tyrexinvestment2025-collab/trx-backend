@@ -1,0 +1,35 @@
+const mongoose = require('mongoose');
+
+const cardTypeSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true
+  },
+  nominalSats: {
+    type: mongoose.Schema.Types.Decimal128,
+    required: true
+  },
+  clientAPY: {
+    type: Number,
+    required: true
+  },
+referralAPY: {
+    type: Number,
+    required: true,
+    default: 0
+  },
+  available: {
+    type: Number,
+    default: 0
+  },
+  imageUrl: {
+    type: String,
+    default: ''
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+});
+
+module.exports = mongoose.model('CardType', cardTypeSchema);

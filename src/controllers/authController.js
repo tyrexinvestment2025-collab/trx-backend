@@ -24,6 +24,7 @@ exports.login = async (req, res) => {
     
     const STARTING_USD = '100000.00'; 
 
+    // 1. Пытаемся найти пользователя
     let user = await User.findOne({ tgId: telegramUser.id });
     let uplineUser = null;
 
@@ -33,14 +34,16 @@ exports.login = async (req, res) => {
     }
 
     if (!user) {
+      // 2. Если пользователя нет, готовим данные для создания
       let newReferralCode;
       let isCodeUnique = false;
       while (!isCodeUnique) {
         newReferralCode = generateReferralCode();
+        // Важно: здесь тоже может быть гонка, но вероятность мала
         if (!(await User.findOne({ referralCode: newReferralCode }))) isCodeUnique = true;
       }
 
-      user = new User({
+      const newUser = new User({
         tgId: telegramUser.id,
         username: telegramUser.username || '',
         role: role,
@@ -49,8 +52,25 @@ exports.login = async (req, res) => {
         referralCode: newReferralCode,
         uplineUserId: uplineUser ? uplineUser._id : null
       });
-      await user.save();
+
+      try {
+        // 3. Пытаемся сохранить
+        await newUser.save();
+        user = newUser; // Если успех, используем нового юзера
+      } catch (error) {
+        // 4. ЛОВИМ ОШИБКУ E11000 (Дубликат)
+        if (error.code === 11000) {
+            console.log('Race condition detected: User already created by parallel request. Fetching...');
+            // Если параллельный запрос уже создал юзера, просто находим его
+            user = await User.findOne({ tgId: telegramUser.id });
+        } else {
+            // Если это другая ошибка - выбрасываем её дальше
+            throw error;
+        }
+      }
+
     } else {
+      // Логика обновления существующего пользователя
       user.username = telegramUser.username || user.username;
       user.role = role;
       
@@ -65,8 +85,12 @@ exports.login = async (req, res) => {
       if (!user.uplineUserId && uplineUser) user.uplineUserId = uplineUser._id;
       
       await user.save();
-      // Обновляем статус на всякий случай
       await updateUserStatus(user._id); 
+    }
+
+    // Дополнительная проверка на случай, если user всё еще null (крайне маловероятно)
+    if (!user) {
+        return res.status(500).json({ message: 'Error retrieving user' });
     }
 
     const token = jwt.sign(
@@ -75,7 +99,6 @@ exports.login = async (req, res) => {
       { expiresIn: '30d' }
     );
     
-    // Получаем актуального юзера после всех обновлений статуса
     const finalUser = await User.findById(user._id);
 
     res.json({

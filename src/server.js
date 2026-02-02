@@ -21,14 +21,29 @@ app.use(cors());
 
 // Подключение API
 app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/cards', cardRoutes); // <--- Подключили
-app.use('/api/v1/user', userRoutes); // <--- Подключили (для профиля и выводов) -> api/v1/user/profile
+app.use('/api/v1/cards', cardRoutes);
+app.use('/api/v1/user', userRoutes);
 app.use('/api/v1/admin', adminRoutes)
 app.use('/api/v1/referrals', referralRoutes);
 
 app.get('/', (req, res) => {
   res.send('Tyrex API is running...');
 });
+
+const allowedOrigins = [
+  'https://your-frontend-app.vercel.app', 
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  }
+}));
 
 startCronJobs();
 startPriceUpdater();

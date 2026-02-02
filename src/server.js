@@ -31,7 +31,7 @@ app.get('/', (req, res) => {
 });
 
 const allowedOrigins = [
-  'https://your-frontend-app.vercel.app', 
+  'https://tyrex-currency.vercel.app/', 
 ];
 
 app.use(cors({

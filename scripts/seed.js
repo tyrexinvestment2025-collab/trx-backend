@@ -1,9 +1,11 @@
-// Этот скрипт очищает коллекцию cardtypes и заполняет ее стартовыми данными
+// seed.js
+// Этот скрипт очищает коллекции cardtypes и usercards, и заполняет cardtypes новыми данными с учетом maxSupply
 
-require('dotenv').config(); // Чтобы .env переменные были доступны
+require('dotenv').config(); 
 const mongoose = require('mongoose');
-const connectDB = require('../src/config/db'); // Путь к вашему файлу подключения
-const CardType = require('../src/models/CardType'); // Путь к модели
+const connectDB = require('../src/config/db'); 
+const CardType = require('../src/models/CardType'); 
+const UserCard = require('../src/models/UserCard'); // Импортируем, чтобы очистить старые покупки
 
 const cards = [
   {
@@ -11,7 +13,8 @@ const cards = [
     nominalSats: 100000,   // 0.001 BTC
     clientAPY: 6,
     referralAPY: 6,
-    available: 19,
+    maxSupply: 100,        // НОВОЕ: Всего выпущено 100 штук
+    available: 100,        // НОВОЕ: На старте доступно все 100
     isActive: true
   },
   {
@@ -19,7 +22,8 @@ const cards = [
     nominalSats: 500000,   // 0.005 BTC
     clientAPY: 10,
     referralAPY: 5,
-    available: 29,
+    maxSupply: 50,         // Лимит 50 штук
+    available: 50,
     isActive: true
   },
   {
@@ -27,7 +31,17 @@ const cards = [
     nominalSats: 10000000, // 0.1 BTC
     clientAPY: 25,
     referralAPY: 2,
-    available: 5,
+    maxSupply: 10,         // Эксклюзив, всего 10 штук
+    available: 10,
+    isActive: true
+  },
+    {
+    name: 'Tyrex Infinity',
+    nominalSats: 50000000, // 0.1 BTC
+    clientAPY: 2500,
+    referralAPY: 2,
+    maxSupply: 3,         // Эксклюзив, всего 10 штук
+    available: 3,
     isActive: true
   }
 ];
@@ -37,13 +51,17 @@ const seedDatabase = async () => {
     await connectDB();
     console.log('MongoDB connected for seeding...');
 
-    // Очищаем коллекцию
+    // 1. Очищаем покупки пользователей (ВАЖНО: старые карты без serialNumber сломают новый фронтенд)
+    await UserCard.deleteMany({});
+    console.log('UserCards collection cleared (Clean start for NFTs).');
+
+    // 2. Очищаем типы карт
     await CardType.deleteMany({});
     console.log('CardTypes collection cleared.');
 
-    // Вставляем новые данные
+    // 3. Вставляем новые коллекции с параметрами тиража
     await CardType.insertMany(cards);
-    console.log('Data seeded successfully!');
+    console.log('New Collection Data seeded successfully!');
 
   } catch (error) {
     console.error('Error seeding data:', error);
@@ -51,6 +69,7 @@ const seedDatabase = async () => {
     // Закрываем соединение
     await mongoose.connection.close();
     console.log('MongoDB connection closed.');
+    process.exit(0);
   }
 };
 

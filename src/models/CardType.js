@@ -13,10 +13,15 @@ const cardTypeSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
-referralAPY: {
+  referralAPY: {
     type: Number,
     required: true,
     default: 0
+  },
+  maxSupply: {
+    type: Number,
+    required: true,
+    default: 100
   },
   available: {
     type: Number,

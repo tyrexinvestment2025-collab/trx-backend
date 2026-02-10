@@ -4,121 +4,71 @@ const User = require('../models/User');
 const { getBitcoinPrice } = require('./priceService');
 
 const startCronJobs = () => {
-  console.log('Cron jobs initialized...');
+  console.log('Mining Hub: Pulse services initialized.');
 
-  // ---------------------------------------------------------
-  // ЗАДАЧА 1: Ежеминутное начисление (Sats + USD)
-  // ---------------------------------------------------------
+  // ЗАДАЧА 1: LIVE ACCRUAL (SATS & USD)
   cron.schedule('* * * * *', async () => {
-    // console.log('[Cron] Minute Accrual...'); 
-    
     try {
-      // Подгружаем карты
       const activeCards = await UserCard.find({ status: 'Active' }).populate('cardTypeId');
       const btcPrice = getBitcoinPrice(); 
-
-      let processedCount = 0;
       const minutesInYear = 365 * 24 * 60; 
-
-      // Кэш для обновления юзеров, чтобы не делать 100 запросов к одному юзеру, если у него 100 карт
-      const userProfitUpdates = {}; 
 
       for (const card of activeCards) {
         if (!card.cardTypeId) continue;
 
         const nominalSats = parseFloat(card.nominalSats.toString());
-        const currentProfitSats = parseFloat(card.currentProfitSats.toString());
-        const currentProfitUsd = parseFloat(card.currentProfitUsd.toString());
-
-        // Расчет дохода
+        // Доход в минуту = APY / количество минут в году
         const minuteRate = (card.cardTypeId.clientAPY / 100) / minutesInYear;
+        
         const minuteProfitSats = nominalSats * minuteRate;
         const minuteProfitUsd = (minuteProfitSats / 100000000) * btcPrice;
 
         if (minuteProfitSats > 0) {
-          // 1. Обновляем КАРТУ (накопительный профит на самой карте)
-          card.currentProfitSats = currentProfitSats + minuteProfitSats;
-          card.currentProfitUsd = currentProfitUsd + minuteProfitUsd;
-          card.lastAccrualDate = new Date();
-          await card.save();
-          
-          // 2. Собираем данные для обновления ЮЗЕРА (Статистика общего профита)
-          if (!userProfitUpdates[card.userId]) {
-             userProfitUpdates[card.userId] = 0;
-          }
-          userProfitUpdates[card.userId] += minuteProfitUsd;
+          // Обновляем состояние самой карты (ноды)
+          await UserCard.updateOne({ _id: card._id }, {
+              $inc: { 
+                  currentProfitSats: minuteProfitSats, 
+                  currentProfitUsd: minuteProfitUsd 
+              },
+              $set: { lastAccrualDate: new Date() }
+          });
 
-          processedCount++;
+          // Обновляем статистику пользователя (сколько всего заработал за всё время)
+          await User.updateOne({ _id: card.userId }, {
+              $inc: { 'balance.totalProfitUsd': minuteProfitUsd }
+          });
         }
       }
-
-      // 3. Массово обновляем статистику пользователей
-      // Это переносит накопленный за минуту профит в поле totalProfitUsd пользователя
-      const userIds = Object.keys(userProfitUpdates);
-      if (userIds.length > 0) {
-          await Promise.all(userIds.map(async (userId) => {
-              const profitToAdd = userProfitUpdates[userId];
-              
-              // Используем $inc для безопасного добавления к текущему значению
-              await User.findByIdAndUpdate(userId, {
-                  $inc: { 'balance.totalProfitUsd': profitToAdd }
-              });
-          }));
-      }
-      
-      if (processedCount > 0) {
-          // console.log(`[Cron] Updated ${processedCount} cards and ${userIds.length} users.`);
-      }
-
-    } catch (error) {
-      console.error('[Cron] Error in minute accrual:', error);
-    }
+    } catch (e) { console.error('[Mining Hub] Accrual Error:', e); }
   });
 
-  // ---------------------------------------------------------
-  // ЗАДАЧА 2: Разморозка средств (Cooling -> Finished)
-  // ---------------------------------------------------------
+  // ЗАДАЧА 2: VAULT UNLOCK (Cooling -> Finished)
   cron.schedule('* * * * *', async () => {
     try {
       const now = new Date();
-      const cardsToUnlock = await UserCard.find({ 
-        status: 'Cooling', 
-        unlockAt: { $lte: now } 
-      });
+      // Ищем ноды, у которых срок "заморозки" вышел
+      const lockedNodes = await UserCard.find({ status: 'Cooling', unlockAt: { $lte: now } });
 
-      for (const card of cardsToUnlock) {
-        const user = await User.findById(card.userId);
-        if (!user) continue;
+      for (const node of lockedNodes) {
+        const price = parseFloat(node.purchasePriceUsd.toString());
 
-        const purchasePrice = parseFloat(card.purchasePriceUsd.toString());
+        // Атомный возврат ТЕЛА покупки в Wallet пользователя
+        await User.updateOne({ _id: node.userId }, {
+            $inc: { 
+                'balance.walletUsd': price,
+                'balance.pendingWithdrawalUsd': -price // Убираем из пендинга
+            }
+        });
 
-        // Размораживаем тело покупки
-        // При остановке (Stop) мы перевели деньги в Pending. Сейчас забираем из Pending в Wallet.
+        // Сбрасываем статус ноды на Inactive (готова к повторной активации или продаже)
+        node.status = 'Inactive';
+        node.currentProfitSats = 0;
+        node.currentProfitUsd = 0;
+        await node.save();
         
-        let userPending = parseFloat(user.balance.pendingWithdrawalUsd.toString());
-        let userWallet = parseFloat(user.balance.walletUsd.toString());
-
-        // Защита от отрицательных значений
-        if (userPending >= purchasePrice) {
-            userPending -= purchasePrice;
-        } else {
-            userPending = 0;
-        }
-
-        userWallet += purchasePrice;
-
-        user.balance.pendingWithdrawalUsd = userPending;
-        user.balance.walletUsd = userWallet;
-        
-        await user.save();
-
-        card.status = 'Finished';
-        await card.save();
-        console.log(`[Cron] Unlocked card ${card._id}, returned $${purchasePrice} to user.`);
+        console.log(`[Vault] Node ${node._id} unfrozen. Allocation of $${price} returned.`);
       }
-    } catch (error) {
-      console.error('[Cron] Error in unlocking funds:', error);
-    }
+    } catch (e) { console.error('[Vault] Unlock Error:', e); }
   });
 };
 

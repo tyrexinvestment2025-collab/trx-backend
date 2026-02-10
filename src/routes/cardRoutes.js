@@ -10,7 +10,7 @@ const {
   startCard, 
   stopCard,
   sellCardBack,
-  getCardHistoryBySerial
+  getCardHistoryBySerial,
 } = require('../controllers/cardController');
 
 router.get('/types', getCardTypes);
@@ -19,7 +19,7 @@ router.get('/my', protect, getMyCards);
 router.post('/buy', protect, buyCard);
 router.get('/types/:id/items', getCollectionItems); 
 router.get('/history/:typeId/:serial', getCardHistoryBySerial);
-router.post('/:id/sell-back', protect, sellCardBack); // <--- Продажа системе
+router.post('/:id/sell-back', protect, sellCardBack);
 
 router.post('/:id/stop', protect, stopCard);
 router.post('/:id/start', protect, startCard);

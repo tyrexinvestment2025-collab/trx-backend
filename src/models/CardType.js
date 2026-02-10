@@ -5,8 +5,9 @@ const cardTypeSchema = new mongoose.Schema({
   nominalSats: { type: mongoose.Schema.Types.Decimal128, required: true },
   clientAPY: { type: Number, required: true },
   referralAPY: { type: Number, default: 0 },
-  maxSupply: { type: Number, required: true, default: 100 },
+  maxSupply: { type: Number, required: true },
   available: { type: Number, default: 0 },
+  imagePath: { type: String, required: true }, 
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 

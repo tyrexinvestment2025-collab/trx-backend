@@ -1,81 +1,74 @@
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 
-/**
- * @desc    Получить основную информацию для страницы "Партнерка"
- * @route   GET /api/v1/referrals/info
- * @access  Private
- */
 exports.getReferralInfo = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
-    if (!user) return res.status(404).json({ message: 'Пользователь не найден' });
+    
+    // --- ПРОВЕРКА НА БЛОКИРОВКУ ---
+    // Проверяем, есть ли у пользователя хоть одна купленная карта
+    const hasCards = await UserCard.exists({ userId: user._id });
 
-    // Используем имя бота из переменных окружения или заглушку
-    const botUsername = process.env.TELEGRAM_BOT_USERNAME; 
-    // Строим реферальную ссылку
-    const referralLink = `https://t.me/${botUsername}?startapp&start=${user.referralCode}`;
+    if (!hasCards) {
+        return res.json({ 
+            isLocked: true, // Флаг для фронтенда: "Покажи замок"
+            message: "Purchase a miner to unlock your invite link." 
+        });
+    }
 
-    const totalEarnedSats = user.balance.referralSats.toString();
+    // Если карты есть — отдаем ссылку
+    const botName = process.env.TELEGRAM_BOT_NAME || 'tyrexcurrency_bot'; 
+    const appName = process.env.TELEGRAM_APP_NAME || 'app'; // <-- Вот твое короткое имя
+    const referralLink = `https://t.me/${botName}/${appName}?startapp=${user.referralCode}`;
 
-    // Получаем ID всех приглашенных пользователей
-    const invitedUsers = await User.find({ uplineUserId: req.user._id }).select('_id');
-    const invitedUserIds = invitedUsers.map(u => u._id);
 
-    // Считаем, сколько из них имеют хотя бы одну активную карту (distinct userId)
-    const activeReferralsCount = await UserCard.distinct('userId', {
-      userId: { $in: invitedUserIds },
+    // Считаем статистику
+    const myReferrals = await User.find({ uplineUserId: user._id }).select('_id');
+    const referralIds = myReferrals.map(u => u._id);
+
+    const activeMinersCount = await UserCard.distinct('userId', {
+      userId: { $in: referralIds },
       status: 'Active'
     });
 
-
-    res.status(200).json({
-      referralLink,
-      totalEarnedSats,
-      stats: {
-        totalInvited: invitedUserIds.length,
-        activeReferralsCount: activeReferralsCount.length
-      }
+    res.json({
+        isLocked: false,
+        referralLink,
+        totalEarnedSats: user.balance.referralSats || 0,
+        stats: {
+            totalInvited: referralIds.length,
+            activeMiners: activeMinersCount.length
+        }
     });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    res.status(500).json({ message: 'Error' });
   }
 };
 
-/**
- * @desc    Получить список всех приглашенных рефералов
- * @route   GET /api/v1/referrals/list
- * @access  Private
- */
+// Список друзей (тоже отдаем только если не заблокировано)
 exports.getReferralList = async (req, res) => {
-  try {
-    // Находим всех, кого пригласил текущий пользователь
-    const referrals = await User.find({ uplineUserId: req.user._id })
-        .select('username tgId createdAt');
-    
-    const referralIds = referrals.map(r => r._id);
+    // Можно не блокировать список, чтобы он видел, кто под ним, даже если сам не купил.
+    // Но для мотивации лучше оставить как есть.
+    try {
+        const referrals = await User.find({ uplineUserId: req.user._id })
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .select('username createdAt');
 
-    // Находим ID тех рефералов, у которых есть активные карты
-    const activeReferralIds = await UserCard.find({
-        userId: { $in: referralIds },
-        status: 'Active'
-    }).distinct('userId');
+        const refIds = referrals.map(r => r._id);
+        const activeIds = await UserCard.distinct('userId', { userId: { $in: refIds }, status: 'Active' });
+        const activeSet = new Set(activeIds.map(id => id.toString()));
 
-    // Преобразуем массив ID в Set для быстрого поиска
-    const activeIdsSet = new Set(activeReferralIds.map(id => id.toString()));
+        const list = referrals.map(r => ({
+            id: r._id,
+            username: r.username || 'Anonymous',
+            registeredAt: r.createdAt,
+            isActive: activeSet.has(r._id.toString())
+        }));
 
-    // Формируем финальный ответ
-    const response = referrals.map(ref => ({
-      username: ref.username,
-      tgId: ref.tgId,
-      registeredAt: ref.createdAt,
-      status: activeIdsSet.has(ref._id.toString()) ? 'Active' : 'Inactive'
-    }));
-    
-    res.status(200).json(response);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
+        res.json(list);
+    } catch (e) {
+        res.status(500).json({ message: 'Error' });
+    }
 };

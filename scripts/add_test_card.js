@@ -4,71 +4,61 @@ const fs = require('fs');
 const path = require('path');
 const connectDB = require('../src/config/db');
 const CardType = require('../src/models/CardType');
-const CardImage = require('../src/models/CardImage');
-const UserCard = require('../src/models/UserCard'); // Импортируем для полной очистки
+const UserCard = require('../src/models/UserCard');
+const CardHistory = require('../src/models/CardHistory');
 
 const cardsData = [
-  { name: 'Tyrex Mini', sats: 100000, apy: 6, supply: 500 },
-  { name: 'Tyrex Midi', sats: 500000, apy: 10, supply: 100 },
-  { name: 'Tyrex Maxi', sats: 1000000, apy: 14, supply: 50 },
-  { name: 'Tyrex Ultra', sats: 5000000, apy: 19, supply: 25 },
-  { name: 'Tyrex Infinity', sats: 10000000, apy: 25, supply: 5 }
+  { name: 'Tyrex Mini', sats: 100000, apy: 6, refApy: 6, supply: 500, img: 'coin_0.png' },
+  { name: 'Tyrex Midi', sats: 500000, apy: 10, refApy: 5, supply: 100, img: 'coin_1.png' },
+  { name: 'Tyrex Maxi', sats: 1000000, apy: 14, refApy: 4, supply: 50, img: 'coin_2.png' },
+  { name: 'Tyrex Ultra', sats: 5000000, apy: 19, refApy: 3, supply: 25, img: 'coin_3.png' },
+  { name: 'Tyrex Infinity', sats: 10000000, apy: 25, refApy: 2, supply: 5, img: 'coin_4.png' }
 ];
 
-const reseedDatabase = async () => {
+const reseed = async () => {
   try {
     await connectDB();
-    console.log('🚀 Начинаем полную очистку базы данных...');
-
-    // 1. ПОЛНАЯ ОЧИСТКА (Удаляем всё, чтобы не было мусора)
+    console.log('🚀 Начинаю очистку базы...');
+    
     await CardType.deleteMany({});
-    await CardImage.deleteMany({});
     await UserCard.deleteMany({});
-    console.log('🗑️ База данных полностью очищена (CardTypes, CardImages, UserCards).');
+    await CardHistory.deleteMany({});
 
-    // 2. Цикл создания 5 видов карточек
-    for (let i = 0; i < cardsData.length; i++) {
-      const data = cardsData[i];
-      const imgName = `coin_${i}.png`; // coin_0.png, coin_1.png ...
-      const imgPath = path.join(__dirname, imgName);
+    console.log('♻️ База очищена. Начинаю импорт карточек...');
 
-      if (!fs.existsSync(imgPath)) {
-        console.error(`❌ Файл ${imgName} не найден в папке scripts! Пропускаю эту коллекцию.`);
-        continue;
+    for (let d of cardsData) {
+      // ПРОВЕРКА: Существует ли файл физически?
+      // Мы находимся в /scripts, выходим на уровень выше в корень, затем в /public/nfts
+      const physicalPath = path.join(__dirname, '..', 'public', 'nfts', d.img);
+      
+      if (!fs.existsSync(physicalPath)) {
+        console.error(`❌ ФАЙЛ НЕ НАЙДЕН: ${physicalPath}`);
+        console.log(`Проверь, что в корне проекта есть папка public/nfts и в ней лежит ${d.img}`);
+        continue; // Пропускаем эту карту, если файла нет
       }
 
-      // Читаем картинку
-      const imageBuffer = fs.readFileSync(imgPath);
-      const base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
-
-      // Создаем тип карточки (Коллекцию)
-      const newCardType = await CardType.create({
-        name: data.name,
-        nominalSats: data.sats,
-        clientAPY: data.apy,
-        referralAPY: Math.round(data.apy * 0.1),
-        maxSupply: data.supply,
-        available: data.supply,
+      await CardType.create({
+        name: d.name,
+        nominalSats: d.sats,
+        clientAPY: d.apy,
+        referralAPY: d.refApy,
+        maxSupply: d.supply,
+        available: d.supply,
+        // Этот путь пойдет в браузер: http://localhost:5000/static/nfts/coin_0.png
+        imagePath: `/static/nfts/${d.img}`,
         isActive: true
       });
-
-      // Привязываем картинку к этой коллекции (индекс 0 - основная)
-      await CardImage.create({
-        cardTypeId: newCardType._id,
-        imageData: base64Image,
-        index: 0
-      });
-
-      console.log(`✅ Создана коллекция: ${data.name} (Тираж: ${data.supply})`);
+      
+      console.log(`✅ Создана карта: ${d.name} (Файл: ${d.img})`);
     }
 
-    console.log('--- 🎉 База данных успешно обновлена! ---');
+    console.log('✨ ГОРЯЧИЙ РЕСИД ЗАВЕРШЕН УСПЕШНО!');
   } catch (error) {
-    console.error('❌ Ошибка при сидировании:', error);
+    console.error('❌ ОШИБКА ПРИ ВЫПОЛНЕНИИ:', error);
   } finally {
-    await mongoose.connection.close();
-    process.exit(0);
+    mongoose.connection.close();
+    process.exit();
   }
 };
 
-reseedDatabase();
+reseed();

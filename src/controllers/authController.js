@@ -7,104 +7,88 @@ const { updateUserStatus } = require('../utils/userStatusHelper');
 exports.login = async (req, res) => {
   try {
     const { initData } = req.body;
-    if (!initData) return res.status(400).json({ message: 'initData is required' });
+    if (!initData) return res.status(400).json({ message: 'No initData' });
 
+    // 1. Проверяем подпись
     const isValid = verifyTelegramWebAppData(initData);
-    if (!isValid) return res.status(401).json({ message: 'Invalid Telegram data' });
+    if (!isValid) return res.status(401).json({ message: 'Invalid data' });
 
+    // 2. Парсим данные
     const urlParams = new URLSearchParams(initData);
     const userString = urlParams.get('user');
-    const startParam = urlParams.get('start_param');
+    const startParam = urlParams.get('start_param'); 
     
-    if (!userString) return res.status(400).json({ message: 'User data missing' });
-
     const telegramUser = JSON.parse(userString);
-    const adminIds = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => id.trim()) : [];
+    const adminIds = (process.env.ADMIN_IDS || '').split(',');
     const role = adminIds.includes(String(telegramUser.id)) ? 'ADMIN' : 'USER';
-    
-    const STARTING_USD = '100000.00'; 
 
-    // 1. Пытаемся найти пользователя
+    // 3. Ищем пользователя
     let user = await User.findOne({ tgId: telegramUser.id });
-    let uplineUser = null;
 
-    if (startParam) {
-        uplineUser = await User.findOne({ referralCode: startParam });
-        if (uplineUser && uplineUser.tgId === telegramUser.id) uplineUser = null;
-    }
-
+    // --- ЕСЛИ ПОЛЬЗОВАТЕЛЬ НОВЫЙ ---
     if (!user) {
-      // 2. Если пользователя нет, готовим данные для создания
-      let newReferralCode;
-      let isCodeUnique = false;
-      while (!isCodeUnique) {
-        newReferralCode = generateReferralCode();
-        // Важно: здесь тоже может быть гонка, но вероятность мала
-        if (!(await User.findOne({ referralCode: newReferralCode }))) isCodeUnique = true;
-      }
+        let uplineId = null;
 
-      const newUser = new User({
-        tgId: telegramUser.id,
-        username: telegramUser.username || '',
-        role: role,
-        'balance.walletUsd': STARTING_USD,
-        accountStatus: 'DEPOSITOR', 
-        referralCode: newReferralCode,
-        uplineUserId: uplineUser ? uplineUser._id : null
-      });
-
-      try {
-        // 3. Пытаемся сохранить
-        await newUser.save();
-        user = newUser; // Если успех, используем нового юзера
-      } catch (error) {
-        // 4. ЛОВИМ ОШИБКУ E11000 (Дубликат)
-        if (error.code === 11000) {
-            console.log('Race condition detected: User already created by parallel request. Fetching...');
-            // Если параллельный запрос уже создал юзера, просто находим его
-            user = await User.findOne({ tgId: telegramUser.id });
-        } else {
-            // Если это другая ошибка - выбрасываем её дальше
-            throw error;
+        // Ищем пригласившего
+        if (startParam) {
+            const inviter = await User.findOne({ referralCode: startParam });
+            if (inviter && inviter.tgId !== telegramUser.id) {
+                uplineId = inviter._id;
+            }
         }
-      }
 
-    } else {
-      // Логика обновления существующего пользователя
-      user.username = telegramUser.username || user.username;
-      user.role = role;
-      
-      if (!user.referralCode) {
-          let newCode;
-          do {
+        // Генерируем код
+        let newCode = generateReferralCode();
+        while (await User.findOne({ referralCode: newCode })) {
             newCode = generateReferralCode();
-          } while (await User.findOne({ referralCode: newCode }));
-          user.referralCode = newCode;
-      }
-      
-      if (!user.uplineUserId && uplineUser) user.uplineUserId = uplineUser._id;
-      
-      await user.save();
-      await updateUserStatus(user._id); 
+        }
+
+        // Создаем объект (но пока не сохраняем в БД)
+        const newUser = new User({
+            tgId: telegramUser.id,
+            username: telegramUser.username || `User${telegramUser.id}`,
+            role,
+            referralCode: newCode,
+            uplineUserId: uplineId,
+            balance: { walletUsd: 100000 }, // Бонус
+            accountStatus: 'NEWBIE'
+        });
+
+        // --- ВАЖНЫЙ БЛОК: ОБРАБОТКА ДУБЛИКАТОВ ---
+        try {
+            await newUser.save();
+            user = newUser; // Успешно создали
+        } catch (error) {
+            // Если ошибка 11000 (Duplicate Key), значит параллельный запрос успел создать юзера раньше нас
+            if (error.code === 11000) {
+                console.log(`⚠️ Race condition handled: User ${telegramUser.id} already exists.`);
+                user = await User.findOne({ tgId: telegramUser.id });
+            } else {
+                // Если это другая ошибка — падаем
+                throw error;
+            }
+        }
+    } 
+    // --- ЕСЛИ ПОЛЬЗОВАТЕЛЬ УЖЕ БЫЛ ---
+    else {
+        user.username = telegramUser.username || user.username;
+        if (!user.referralCode) {
+             user.referralCode = generateReferralCode();
+             await user.save();
+        }
+        // Аплайна не меняем для старых юзеров
     }
 
-    // Дополнительная проверка на случай, если user всё еще null (крайне маловероятно)
+    // Если user все равно null (крайне маловероятно), кидаем ошибку
     if (!user) {
-        return res.status(500).json({ message: 'Error retrieving user' });
+        return res.status(500).json({ message: 'User creation failed due to concurrency' });
     }
 
-    const token = jwt.sign(
-      { id: user._id, tgId: user.tgId, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
-    
-    const finalUser = await User.findById(user._id);
+    await updateUserStatus(user._id);
 
-    res.json({
-      token,
-      user: JSON.parse(JSON.stringify(finalUser))
-    });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    res.json({ token, user });
 
   } catch (error) {
     console.error('Login Error:', error);

@@ -3,68 +3,70 @@ const UserCard = require('../models/UserCard');
 const User = require('../models/User');
 
 const runDailyReferralPayouts = async () => {
-  console.log('[Cron] Starting daily referral payouts job...');
+  console.log('💰 [Mining Pool] Starting daily referral distribution...');
   
   try {
-    // 1. Получаем все активные карты пользователей, подтягивая данные о владельце и типе карты
+    // 1. Берем все АКТИВНЫЕ карты в системе (только активные карты приносят доход)
     const activeCards = await UserCard.find({ status: 'Active' })
       .populate('userId', 'uplineUserId') // Нам нужен upline владельца карты
-      .populate('cardTypeId', 'referralAPY'); // Нам нужен реф. процент с типа карты
+      .populate('cardTypeId', 'referralAPY'); // Нам нужен % рефки
 
-    let payoutsCount = 0;
+    let totalSatsDistributed = 0;
     
     for (const card of activeCards) {
-      const cardOwner = card.userId;
-      const cardType = card.cardTypeId;
-
-      // 2. Проверяем, есть ли у владельца карты пригласитель (аплайн)
-      if (!cardOwner || !cardOwner.uplineUserId || !cardType || !cardType.referralAPY) {
-        continue; // Если нет аплайна или реф. процента, пропускаем
-      }
-
-      const uplineId = cardOwner.uplineUserId;
-
-      // 3. Проверка "Активного Аплайна" - самая важная часть
-      const isUplineActive = await UserCard.exists({ userId: uplineId, status: 'Active' });
-
-      if (!isUplineActive) {
-        console.log(`[Cron] Skipping payout for upline ${uplineId} because they are inactive.`);
+      const miner = card.userId;
+      
+      // Пропускаем, если:
+      // - у юзера нет аплайна
+      // - у карты нет типа или реферального процента
+      if (!miner || !miner.uplineUserId || !card.cardTypeId || !card.cardTypeId.referralAPY) {
         continue;
       }
 
-      // 4. Если все проверки пройдены, рассчитываем и начисляем вознаграждение
-      const nominal = parseFloat(card.nominalSats.toString());
-      const referralAPY = cardType.referralAPY;
+      const uplineId = miner.uplineUserId;
+
+      // 2. ПРАВИЛО: Лидер получает доход, ТОЛЬКО если сам имеет активную карту
+      const isUplineActive = await UserCard.exists({ userId: uplineId, status: 'Active' });
       
-      // Расчет дневного вознаграждения (округляем вниз до целого сатоши)
-      const dailyReward = Math.floor((nominal * (referralAPY / 100)) / 365);
+      if (!isUplineActive) {
+          // Лидер не майнит -> не получает бонус
+          continue; 
+      }
+
+      // 3. РАСЧЕТ
+      // Формула: (Номинал_Sats * Ref_APY / 100) / 365 дней
+      const nominal = parseFloat(card.nominalSats.toString());
+      const refAPY = card.cardTypeId.referralAPY;
+      
+      const dailyReward = Math.floor((nominal * (refAPY / 100)) / 365);
 
       if (dailyReward > 0) {
-        // 5. Атомарно обновляем баланс аплайна
+        // 4. НАЧИСЛЕНИЕ (Атомарно)
         await User.updateOne(
           { _id: uplineId },
           {
             $inc: {
-              'balance.walletSats': dailyReward,
-              'balance.referralSats': dailyReward
+              'balance.walletSats': dailyReward,   // Доступно к выводу
+              'balance.referralSats': dailyReward  // Общая статистика рефки
             }
           }
         );
-        payoutsCount++;
+        totalSatsDistributed += dailyReward;
       }
     }
     
-    console.log(`[Cron] Daily referral job finished. Processed ${payoutsCount} payouts.`);
+    console.log(`✅ [Mining Pool] Distributed ${totalSatsDistributed} SATS to leaders.`);
 
   } catch (error) {
-    console.error('[Cron] Error during daily referral payouts:', error);
+    console.error('❌ [Mining Pool] Error:', error);
   }
 };
 
-// Запускаем задачу каждый день в 3:01 ночи по UTC
+// Запуск каждый день в 00:00
 const startReferralJob = () => {
-  cron.schedule('1 3 * * *', runDailyReferralPayouts);
-  console.log('Daily referral payout job scheduled for 03:01 UTC.');
+  // Для тестов можешь поставить '* * * * *' (каждую минуту)
+  cron.schedule('0 0 * * *', runDailyReferralPayouts);
+  console.log('⏰ Referral Cronjob scheduled (Daily 00:00).');
 };
 
 module.exports = { startReferralJob };

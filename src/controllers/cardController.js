@@ -2,33 +2,39 @@ const CardType = require('../models/CardType');
 const UserCard = require('../models/UserCard');
 const CardHistory = require('../models/CardHistory');
 const User = require('../models/User');
+const CardImage = require('../models/CardImage'); // НОВОЕ
 const { getBitcoinPrice } = require('../services/priceService');
 const { updateUserStatus } = require('../utils/userStatusHelper');
 
 const parseDecimal = (value) => value ? parseFloat(value.toString()) : 0;
 
-// ... (getCardTypes, getCollectionItems, getMyCards - БЕЗ ИЗМЕНЕНИЙ)
+// Список коллекций
 exports.getCardTypes = async (req, res) => {
     try {
-      const cardTypes = await CardType.find({ isActive: true });
-      const btcPrice = getBitcoinPrice();
-  
-      const response = cardTypes.map(card => {
-        const nominalSats = parseDecimal(card.nominalSats);
-        const priceUSDT = (nominalSats / 100000000) * btcPrice;
-        return {
-          ...card.toObject(),
-          nominalSats: nominalSats,
-          priceUSDT: Math.round(priceUSDT)
-        };
-      });
-      res.json(response);
+        const cardTypes = await CardType.find({ isActive: true });
+        const btcPrice = getBitcoinPrice();
+
+        const response = await Promise.all(cardTypes.map(async card => {
+            const nominalSats = parseDecimal(card.nominalSats);
+            const priceUSDT = (nominalSats / 100000000) * btcPrice;
+            
+            // Для превью берем первую картинку из отдельной коллекции
+            const firstImg = await CardImage.findOne({ cardTypeId: card._id, index: 0 });
+            
+            return {
+                ...card.toObject(),
+                nominalSats: nominalSats,
+                priceUSDT: Math.round(priceUSDT),
+                imageUrl: firstImg ? firstImg.imageData : ''
+            };
+        }));
+        res.json(response);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: 'Server Error' });
     }
 };
 
+// Список номеров внутри коллекции
 exports.getCollectionItems = async (req, res) => {
     try {
         const { id } = req.params;
@@ -39,16 +45,22 @@ exports.getCollectionItems = async (req, res) => {
         const nominalSats = parseDecimal(cardType.nominalSats);
         const priceUSDT = Math.round((nominalSats / 100000000) * btcPrice);
 
+        // Получаем все картинки этой коллекции
+        const allImages = await CardImage.find({ cardTypeId: id }).sort({ index: 1 });
+        const imagesCount = allImages.length;
+
         const soldCards = await UserCard.find({ cardTypeId: id }).select('serialNumber');
         const soldSet = new Set(soldCards.map(c => c.serialNumber));
 
         const items = [];
         for (let i = 1; i <= cardType.maxSupply; i++) {
+            const imgIndex = (i - 1) % imagesCount;
             items.push({
                 serialNumber: i,
                 isSold: soldSet.has(i),
-                priceUSDT: priceUSDT, 
-                nominalSats: nominalSats
+                priceUSDT: priceUSDT,
+                nominalSats: nominalSats,
+                imageUrl: allImages[imgIndex] ? allImages[imgIndex].imageData : ''
             });
         }
 
@@ -56,136 +68,104 @@ exports.getCollectionItems = async (req, res) => {
             collection: { ...cardType.toObject(), priceUSDT },
             items
         });
-
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-exports.getMyCards = async (req, res) => {
-    try {
-      const cards = await UserCard.find({ userId: req.user._id }).populate('cardTypeId');
-      res.json(JSON.parse(JSON.stringify(cards)));
-    } catch (error) {
-      res.status(500).json({ message: 'Server Error' });
-    }
-};
-
-// --- ПОКУПКА (С ЗАПИСЬЮ В ИСТОРИЮ) ---
+// Покупка карты
 exports.buyCard = async (req, res) => {
-  const { cardTypeId, serialNumber } = req.body;
-
-  try {
-    const user = await User.findById(req.user._id);
-    const cardType = await CardType.findById(cardTypeId);
-    const btcPrice = getBitcoinPrice();
-
-    if (!cardType) return res.status(404).json({ message: 'Card type not found' });
-    if (serialNumber < 1 || serialNumber > cardType.maxSupply) return res.status(400).json({ message: 'Invalid serial number' });
-
-    const existingCard = await UserCard.findOne({ cardTypeId, serialNumber });
-    if (existingCard) return res.status(400).json({ message: `Serial #${serialNumber} is already sold out` });
-
-    const nominalSats = parseDecimal(cardType.nominalSats);
-    const costUsd = (nominalSats / 100000000) * btcPrice;
-    const userWalletUsd = parseDecimal(user.balance.walletUsd);
-
-    if (userWalletUsd < costUsd) {
-      return res.status(400).json({ message: `Insufficient funds.` });
-    }
-
-    // Списание
-    user.balance.walletUsd = userWalletUsd - costUsd;
-    
-    // Уменьшаем available
-    if (cardType.available > 0) {
-        cardType.available -= 1;
-        await cardType.save();
-    }
-    await user.save();
-
-    // Создаем карту
-    const newCard = await UserCard.create({
-      userId: user._id,
-      cardTypeId: cardType._id,
-      serialNumber: serialNumber,
-      nominalSats: cardType.nominalSats.toString(),
-      purchasePriceUsd: costUsd.toString(),
-      status: 'Inactive', 
-      lastAccrualDate: Date.now()
-    });
-
-    // ИСТОРИЯ: Покупка
-    await CardHistory.create({
-        cardTypeId: cardType._id,
-        serialNumber: serialNumber,
-        userId: user._id,
-        eventType: 'PURCHASE',
-        priceUsd: costUsd,
-        endedAt: Date.now()
-    });
-
-    await updateUserStatus(user._id);
-
-    res.status(201).json({ message: `Tyrex #${serialNumber} purchased`, card: newCard });
-  } catch (error) {
-    console.error(error);
-    if (error.code === 11000) return res.status(400).json({ message: 'Already bought.' });
-    res.status(500).json({ message: 'Transaction failed' });
-  }
-};
-
-
-// --- ПРОДАЖА СИСТЕМЕ (НОВОЕ) ---
-exports.sellCardBack = async (req, res) => {
+    const { cardTypeId, serialNumber } = req.body;
     try {
-        const { id } = req.params; // ID карты UserCard
-        
-        const card = await UserCard.findOne({ _id: id, userId: req.user._id });
-        if (!card) return res.status(404).json({ message: 'Card not found' });
+        const user = await User.findById(req.user._id);
+        const cardType = await CardType.findById(cardTypeId);
+        const btcPrice = getBitcoinPrice();
 
-        // Продавать можно только Inactive (остановить майнинг сначала)
-        if (card.status !== 'Inactive') {
-            return res.status(400).json({ message: 'Stop mining first to sell' });
+        if (!cardType) return res.status(404).json({ message: 'Not found' });
+
+        const nominalSats = parseDecimal(cardType.nominalSats);
+        const costUsd = (nominalSats / 100000000) * btcPrice;
+
+        if (parseDecimal(user.balance.walletUsd) < costUsd) {
+            return res.status(400).json({ message: 'Insufficient funds' });
         }
 
-        const user = await User.findById(req.user._id);
-        const refundAmount = parseDecimal(card.purchasePriceUsd); // Возвращаем по цене покупки
+        // Вычисляем картинку для этого номера
+        const allImages = await CardImage.find({ cardTypeId: cardType._id }).sort({ index: 1 });
+        const imgIndex = (serialNumber - 1) % allImages.length;
+        const assignedImageUrl = allImages[imgIndex] ? allImages[imgIndex].imageData : '';
 
-        // 1. Возврат денег
-        const currentWallet = parseDecimal(user.balance.walletUsd);
-        user.balance.walletUsd = currentWallet + refundAmount;
+        user.balance.walletUsd = parseDecimal(user.balance.walletUsd) - costUsd;
+        if (cardType.available > 0) cardType.available -= 1;
+        
+        await cardType.save();
         await user.save();
 
-        // 2. Возврат карты в пул (увеличиваем available)
+        const newCard = await UserCard.create({
+            userId: user._id,
+            cardTypeId: cardType._id,
+            serialNumber: serialNumber,
+            nominalSats: cardType.nominalSats.toString(),
+            purchasePriceUsd: costUsd.toString(),
+            imageUrl: assignedImageUrl, // Картинка теперь в UserCard навсегда
+            status: 'Inactive'
+        });
+
+        await CardHistory.create({
+            cardTypeId: cardType._id,
+            serialNumber: serialNumber,
+            userId: user._id,
+            eventType: 'PURCHASE',
+            priceUsd: costUsd
+        });
+
+        await updateUserStatus(user._id);
+        res.status(201).json({ message: 'Success', card: newCard });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error' });
+    }
+};
+exports.getMyCards = async (req, res) => {
+    try {
+        const cards = await UserCard.find({ userId: req.user._id }).populate('cardTypeId');
+        res.json(cards);
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+exports.sellCardBack = async (req, res) => {
+    try {
+        const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
+        if (!card || card.status !== 'Inactive') return res.status(400).json({ message: 'Cannot sell' });
+
+        const user = await User.findById(req.user._id);
+        const refund = parseDecimal(card.purchasePriceUsd);
+
+        user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + refund;
+        await user.save();
+
         const cardType = await CardType.findById(card.cardTypeId);
         if (cardType) {
-            if (cardType.available < cardType.maxSupply) {
-                cardType.available += 1;
-                await cardType.save();
-            }
+            cardType.available += 1;
+            await cardType.save();
         }
 
-        // 3. Запись в историю
         await CardHistory.create({
             cardTypeId: card.cardTypeId,
             serialNumber: card.serialNumber,
             userId: user._id,
             eventType: 'SOLD_BACK',
-            priceUsd: refundAmount,
-            endedAt: Date.now()
+            priceUsd: refund
         });
 
-        // 4. Удаление физической карты у пользователя
-        await UserCard.findByIdAndDelete(id);
-        
+        await UserCard.findByIdAndDelete(card._id);
         await updateUserStatus(user._id);
-
-        res.json({ message: 'Card sold back to system', refundAmount });
+        res.json({ message: 'Refunded', refund });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: 'Error' });
     }
 };
 

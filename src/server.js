@@ -46,7 +46,7 @@ app.use(cors({
   }
 }));
 
-startCronJobs();
+// startCronJobs();
 startPriceUpdater();
 startReferralJob(); 
 

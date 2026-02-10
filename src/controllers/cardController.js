@@ -7,11 +7,13 @@ const { updateUserStatus } = require('../utils/userStatusHelper');
 
 const parseDecimal = (v) => v ? parseFloat(v.toString()) : 0;
 
+const getBaseUrl = () => process.env.API_URL || 'http://localhost:5000';
+
 exports.getCardTypes = async (req, res) => {
     try {
         const btcPrice = getBitcoinPrice();
         const types = await CardType.find({ isActive: true }).lean();
-        const baseUrl = process.env.API_URL || 'http://localhost:5000';
+        const baseUrl = getBaseUrl();
 
         const response = types.map(t => ({
             ...t,
@@ -27,7 +29,7 @@ exports.getCollectionItems = async (req, res) => {
     try {
         const { id } = req.params;
         const cardType = await CardType.findById(id).lean();
-        const baseUrl = process.env.API_URL || 'http://localhost:5000';
+        const baseUrl = getBaseUrl();
         const btcPrice = getBitcoinPrice();
         const priceUSDT = Math.round((parseDecimal(cardType.nominalSats) / 100000000) * btcPrice);
 
@@ -53,7 +55,7 @@ exports.buyCard = async (req, res) => {
         const user = await User.findById(req.user._id);
         const type = await CardType.findById(cardTypeId);
         const btcPrice = getBitcoinPrice();
-        const baseUrl = process.env.API_URL || 'http://localhost:5000';
+        const baseUrl = getBaseUrl();
         const cost = (parseDecimal(type.nominalSats) / 100000000) * btcPrice;
 
         if (parseDecimal(user.balance.walletUsd) < cost) return res.status(400).json({ message: 'No money' });
@@ -85,7 +87,6 @@ exports.getMyCards = async (req, res) => {
         res.json(cards);
     } catch (e) { res.status(500).json({ message: 'Error' }); }
 };
-
 exports.startCard = async (req, res) => {
     try {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
@@ -98,7 +99,6 @@ exports.startCard = async (req, res) => {
         res.json({ message: 'Started', card });
     } catch (e) { res.status(500).json({ message: 'Error' }); }
 };
-
 exports.stopCard = async (req, res) => {
     try {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
@@ -114,7 +114,6 @@ exports.stopCard = async (req, res) => {
         res.json({ message: 'Stopped' });
     } catch (e) { res.status(500).json({ message: 'Error' }); }
 };
-
 exports.sellCardBack = async (req, res) => {
     try {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
@@ -127,7 +126,6 @@ exports.sellCardBack = async (req, res) => {
         res.json({ message: 'Sold' });
     } catch (e) { res.status(500).json({ message: 'Error' }); }
 };
-
 exports.getCardHistoryBySerial = async (req, res) => {
     try {
         const history = await CardHistory.find({ cardTypeId: req.params.typeId, serialNumber: req.params.serial }).populate('userId', 'username').sort({ createdAt: -1 });

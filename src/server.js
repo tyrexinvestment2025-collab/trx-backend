@@ -32,6 +32,7 @@ app.get('/', (req, res) => res.send('Tyrex API is running...'));
 startCronJobs();
 startPriceUpdater();
 startReferralJob();
+console.log(`[ENV] API_URL is set to: ${process.env.API_URL}`);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

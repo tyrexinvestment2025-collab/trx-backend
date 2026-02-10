@@ -11,8 +11,7 @@ exports.getCardTypes = async (req, res) => {
     try {
         const btcPrice = getBitcoinPrice();
         const types = await CardType.find({ isActive: true }).lean();
-        // const baseUrl = process.env.API_URL || 'http://localhost:5000';
-        const baseUrl = 'https://trx-backend-1.onrender.com';
+        const baseUrl = process.env.API_URL || 'http://localhost:5000';
 
         const response = types.map(t => ({
             ...t,
@@ -28,8 +27,7 @@ exports.getCollectionItems = async (req, res) => {
     try {
         const { id } = req.params;
         const cardType = await CardType.findById(id).lean();
-        // const baseUrl = process.env.API_URL || 'http://localhost:5000';
-        const baseUrl = 'https://trx-backend-1.onrender.com';
+        const baseUrl = process.env.API_URL || 'http://localhost:5000';
         const btcPrice = getBitcoinPrice();
         const priceUSDT = Math.round((parseDecimal(cardType.nominalSats) / 100000000) * btcPrice);
 

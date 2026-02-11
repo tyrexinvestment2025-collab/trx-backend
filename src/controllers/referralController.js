@@ -18,7 +18,7 @@ exports.getReferralInfo = async (req, res) => {
 
     // Если карты есть — отдаем ссылку
     const botName = process.env.TELEGRAM_BOT_NAME || 'tyrexcurrency_bot'; 
-    const appName = process.env.TELEGRAM_APP_NAME || 'app'; // <-- Вот твое короткое имя
+    const appName = process.env.TELEGRAM_APP_NAME || 'ereeefewefwefwef'; // <-- Вот твое короткое имя
     const referralLink = `https://t.me/${botName}/${appName}?startapp=${user.referralCode}`;
 
 

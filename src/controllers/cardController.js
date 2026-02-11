@@ -7,15 +7,14 @@ const { updateUserStatus } = require('../utils/userStatusHelper');
 
 const parseDecimal = (v) => v ? parseFloat(v.toString()) : 0;
 
-// Умная функция: определяет URL сервера из текущего запроса
-// Теперь она принимает 'req'
+// --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
 const getBaseUrl = (req) => {
-    // В продакшене (Render), используем протокол (https) и хост (домен) из запроса
-    // Это гарантирует, что ссылка будет правильной, независимо от настроек ENV
+    // Если мы на Render (продакшен), всегда принудительно используем HTTPS.
+    // req.protocol на Render часто врет и выдает 'http', что ломает картинки на телефонах.
     if (process.env.NODE_ENV === 'production' && req) {
-        return `${req.protocol}://${req.get('host')}`;
+        return `https://${req.get('host')}`;
     }
-    // Для локальной разработки, используем localhost:5000
+    // Локальная разработка
     return process.env.API_URL || 'http://localhost:5000'; 
 };
 
@@ -24,7 +23,6 @@ exports.getCardTypes = async (req, res) => {
         const btcPrice = getBitcoinPrice();
         const types = await CardType.find({ isActive: true }).lean();
         
-        // Передаем 'req' в getBaseUrl
         const baseUrl = getBaseUrl(req);
 
         const response = types.map(t => ({
@@ -42,9 +40,7 @@ exports.getCollectionItems = async (req, res) => {
         const { id } = req.params;
         const cardType = await CardType.findById(id).lean();
         
-        // Передаем 'req' в getBaseUrl
         const baseUrl = getBaseUrl(req);
-        
         const btcPrice = getBitcoinPrice();
         const priceUSDT = Math.round((parseDecimal(cardType.nominalSats) / 100000000) * btcPrice);
 
@@ -71,7 +67,6 @@ exports.buyCard = async (req, res) => {
         const type = await CardType.findById(cardTypeId);
         const btcPrice = getBitcoinPrice();
         
-        // Передаем 'req' в getBaseUrl
         const baseUrl = getBaseUrl(req);
         
         const cost = (parseDecimal(type.nominalSats) / 100000000) * btcPrice;
@@ -89,7 +84,7 @@ exports.buyCard = async (req, res) => {
             serialNumber,
             nominalSats: type.nominalSats,
             purchasePriceUsd: cost.toFixed(2),
-            imageUrl: `${baseUrl}${type.imagePath}`, // Сохраняем полную ссылку в карту юзера
+            imageUrl: `${baseUrl}${type.imagePath}`, // Сохраняем ссылку с HTTPS
             status: 'Inactive'
         });
 
@@ -101,9 +96,31 @@ exports.buyCard = async (req, res) => {
 
 exports.getMyCards = async (req, res) => {
     try {
+        const baseUrl = getBaseUrl(req);
         const cards = await UserCard.find({ userId: req.user._id }).populate('cardTypeId').lean();
-        // В getMyCards imageUrl уже должен быть в UserCard, сохраненный при покупке
-        res.json(cards);
+
+        // Проверяем и чиним ссылки "на лету", если они были сохранены как http
+        const processedCards = cards.map(card => {
+            let finalImageUrl = card.imageUrl;
+
+            // Если ссылки нет или она битая, восстанавливаем из типа
+            if (!finalImageUrl || !finalImageUrl.startsWith('http')) {
+                if (card.cardTypeId && card.cardTypeId.imagePath) {
+                    finalImageUrl = `${baseUrl}${card.cardTypeId.imagePath}`;
+                }
+            } 
+            // Если ссылка есть, но она HTTP (а мы на https), меняем протокол
+            else if (finalImageUrl.startsWith('http://') && process.env.NODE_ENV === 'production') {
+                finalImageUrl = finalImageUrl.replace('http://', 'https://');
+            }
+            
+            return {
+                ...card,
+                imageUrl: finalImageUrl
+            };
+        });
+
+        res.json(processedCards);
     } catch (e) { res.status(500).json({ message: 'Error' }); }
 };
 
@@ -113,7 +130,7 @@ exports.startCard = async (req, res) => {
         card.status = 'Active';
         card.lastAccrualDate = Date.now();
         await card.save();
-        const user = await User.findById(card.userId); // Берем пользователя из карты
+        const user = await User.findById(card.userId); 
         user.balance.stakingUsd = parseDecimal(user.balance.stakingUsd) + parseDecimal(card.purchasePriceUsd);
         await user.save();
         res.json({ message: 'Started', card });
@@ -125,10 +142,10 @@ exports.stopCard = async (req, res) => {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
         const profit = parseDecimal(card.currentProfitUsd);
         card.status = 'Cooling';
-        card.unlockAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // Разморозка через 30 дней
-        card.currentProfitUsd = 0; // Сбрасываем профит на карте
+        card.unlockAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); 
+        card.currentProfitUsd = 0; 
         await card.save();
-        const user = await User.findById(card.userId); // Берем пользователя из карты
+        const user = await User.findById(card.userId); 
         user.balance.pendingWithdrawalUsd = parseDecimal(user.balance.pendingWithdrawalUsd) + parseDecimal(card.purchasePriceUsd) + profit;
         user.balance.stakingUsd = Math.max(0, parseDecimal(user.balance.stakingUsd) - parseDecimal(card.purchasePriceUsd));
         await user.save();
@@ -140,7 +157,7 @@ exports.sellCardBack = async (req, res) => {
     try {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
         if (!card || card.status !== 'Inactive') return res.status(400).json({ message: 'Mining must be stopped' });
-        const user = await User.findById(card.userId); // Берем пользователя из карты
+        const user = await User.findById(card.userId); 
         user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + parseDecimal(card.purchasePriceUsd);
         await user.save();
         await CardType.findByIdAndUpdate(card.cardTypeId, { $inc: { available: 1 } });

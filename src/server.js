@@ -6,6 +6,7 @@ const connectDB = require('./config/db');
 const { startPriceUpdater } = require('./services/priceService');
 const { startReferralJob } = require('./services/dailyReferralService');
 const startCronJobs = require('./services/cronService');
+const analyticsRoutes = require('./routes/analyticsRoutes');
 
 const authRoutes = require('./routes/authRoutes');
 const cardRoutes = require('./routes/cardRoutes');
@@ -16,16 +17,17 @@ const referralRoutes = require('./routes/referralRoutes');
 connectDB();
 const app = express();
 
-app.use('/static', express.static(path.join(__dirname, '..', 'public')));
-
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); 
 app.use(cors()); 
 
+app.use('/static', express.static(path.join(__dirname, '..', 'public')));
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/cards', cardRoutes);
 app.use('/api/v1/user', userRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/referrals', referralRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
 
 app.get('/', (req, res) => res.send('Tyrex API is running...'));
 

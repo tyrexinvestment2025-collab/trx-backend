@@ -25,6 +25,7 @@ const userSchema = new mongoose.Schema({
 
     // SATS (Крипто баланс для майнинга и рефералки)
     walletSats: { type: Number, default: 0 }, 
+    lastDailyQuizAt: { type: Date, default: null }, // Дата прохождения квиза
     referralSats: { type: Number, default: 0 } 
   },
   isBanned: { type: Boolean, default: false }

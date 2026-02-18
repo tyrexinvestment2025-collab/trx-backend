@@ -4,6 +4,7 @@ const WithdrawalRequest = require('../models/WithdrawalRequest');
 const UserCard = require('../models/UserCard');
 const CardType = require('../models/CardType');
 const { updateUserStatus } = require('../utils/userStatusHelper');
+const Notification = require('../models/Notification'); // ИМПОРТ НОВОЙ МОДЕЛИ
 
 // Вспомогательная функция для безопасного парсинга
 const parseDecimal = (value) => {
@@ -42,40 +43,6 @@ exports.getPendingDeposits = async (req, res) => {
     res.status(500).json({ message: 'Server Error' });
   }
 };
-
-// Подтвердить пополнение
-exports.confirmDeposit = async (req, res) => {
-  try {
-    const deposit = await DepositRequest.findById(req.params.id);
-    if (!deposit || deposit.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending or not found' });
-
-    const user = await User.findById(deposit.userId);
-    // ЗАЩИТА: Если юзер не найден, отклоняем заявку
-    if (!user) {
-        deposit.status = 'REJECTED';
-        deposit.adminComment = 'User not found';
-        await deposit.save();
-        return res.status(404).json({ message: 'User not found, request rejected.' });
-    }
-
-    const userWallet = parseDecimal(user.balance.walletUsd);
-    const depositAmount = parseDecimal(deposit.amountUsd);
-    
-    user.balance.walletUsd = userWallet + depositAmount;
-    await user.save();
-
-    deposit.status = 'CONFIRMED';
-    await deposit.save();
-
-    await updateUserStatus(user._id);
-    res.json({ message: 'Deposit confirmed' });
-  } catch (error) {
-    console.error("Error in confirmDeposit:", error);
-    res.status(500).json({ message: 'Server Error' });
-  }
-};
-
-
 // Получить заявки на вывод
 exports.getPendingWithdrawals = async (req, res) => {
   try {
@@ -113,33 +80,69 @@ exports.getPendingWithdrawals = async (req, res) => {
   }
 };
 
-// Обработать вывод
+
+// Подтвердить пополнение + отправить уведомление
+exports.confirmDeposit = async (req, res) => {
+  try {
+    const deposit = await DepositRequest.findById(req.params.id);
+    if (!deposit || deposit.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending' });
+
+    const user = await User.findById(deposit.userId);
+    if (!user) {
+        deposit.status = 'REJECTED';
+        await deposit.save();
+        return res.status(404).json({ message: 'User not found' });
+    }
+
+    const depositAmount = parseDecimal(deposit.amountUsd);
+    user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + depositAmount;
+    await user.save();
+
+    deposit.status = 'CONFIRMED';
+    await deposit.save();
+
+    // СОЗДАЕМ УВЕДОМЛЕНИЕ
+    await Notification.create({
+        userId: user._id,
+        title: 'Deposit Confirmed',
+        message: `Your account has been successfully topped up by $${depositAmount.toFixed(2)}.`,
+        type: 'DEPOSIT'
+    });
+
+    await updateUserStatus(user._id);
+    res.json({ message: 'Deposit confirmed and notification sent' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
 exports.processWithdrawal = async (req, res) => {
   try {
     const withdrawal = await WithdrawalRequest.findById(req.params.id);
-    if (!withdrawal || withdrawal.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending or not found' });
+    if (!withdrawal || withdrawal.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending' });
 
     const user = await User.findById(withdrawal.userId);
-    // Если юзер есть, обновляем его баланс
     if (user) {
-      const userPending = parseDecimal(user.balance.pendingWithdrawalUsd);
       const withdrawalAmount = parseDecimal(withdrawal.amountUsd);
-      
-      let newPending = userPending - withdrawalAmount;
-      if (newPending < 0) newPending = 0;
-      
-      user.balance.pendingWithdrawalUsd = newPending;
+      let newPending = parseDecimal(user.balance.pendingWithdrawalUsd) - withdrawalAmount;
+      user.balance.pendingWithdrawalUsd = newPending < 0 ? 0 : newPending;
       await user.save();
+
+      // СОЗДАЕМ УВЕДОМЛЕНИЕ
+      await Notification.create({
+          userId: user._id,
+          title: 'Withdrawal Processed',
+          message: `Your withdrawal of $${withdrawalAmount.toFixed(2)} has been processed.`,
+          type: 'WITHDRAWAL'
+      });
     }
 
-    // Заявку закрываем в любом случае (даже если юзера нет)
     withdrawal.status = 'PROCESSED';
     withdrawal.processedDate = Date.now();
     await withdrawal.save();
 
-    res.json({ message: 'Withdrawal processed' });
+    res.json({ message: 'Withdrawal processed and notification sent' });
   } catch (error) {
-    console.error("Error in processWithdrawal:", error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
@@ -357,4 +360,66 @@ exports.updateCardType = async (req, res) => {
     }
 };
 
+exports.rejectWithdrawal = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { adminComment } = req.body;
 
+        const withdrawal = await WithdrawalRequest.findById(id);
+        if (!withdrawal || withdrawal.status !== 'PENDING') return res.status(400).json({ message: 'Request not pending' });
+
+        const user = await User.findById(withdrawal.userId);
+        if (user) {
+            const amount = parseDecimal(withdrawal.amountUsd);
+            
+            // Возвращаем деньги из Pending в Wallet
+            user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + amount;
+            let newPending = parseDecimal(user.balance.pendingWithdrawalUsd) - amount;
+            user.balance.pendingWithdrawalUsd = newPending < 0 ? 0 : newPending;
+            
+            await user.save();
+
+            // Уведомляем пользователя
+            await Notification.create({
+                userId: user._id,
+                title: 'Withdrawal Failed',
+                message: `Your withdrawal request was rejected. Reason: ${adminComment || 'Security check failed'}. Funds have been returned to your balance.`,
+                type: 'WITHDRAWAL'
+            });
+        }
+
+        withdrawal.status = 'REJECTED';
+        withdrawal.adminComment = adminComment || 'Rejected by admin';
+        await withdrawal.save();
+
+        res.json({ message: 'Withdrawal rejected and funds returned' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+// ОТКЛОНИТЬ ПОПОЛНЕНИЕ
+exports.rejectDeposit = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { adminComment } = req.body; // Причина отказа
+
+        const deposit = await DepositRequest.findById(id);
+        if (!deposit || deposit.status !== 'PENDING') return res.status(400).json({ message: 'Request not pending' });
+
+        deposit.status = 'REJECTED';
+        deposit.adminComment = adminComment || 'Transaction not found or invalid';
+        await deposit.save();
+
+        // Уведомляем пользователя
+        await Notification.create({
+            userId: deposit.userId,
+            title: 'Deposit Rejected',
+            message: `Your deposit request for $${parseDecimal(deposit.amountUsd).toFixed(2)} was rejected. Reason: ${deposit.adminComment}`,
+            type: 'DEPOSIT' // Тип оставим DEPOSIT, но в сообщении будет отказ
+        });
+
+        res.json({ message: 'Deposit rejected' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+};

@@ -11,7 +11,9 @@ const {
   getPendingDeposits,
   confirmDeposit,
   getPendingWithdrawals,
-  processWithdrawal
+  processWithdrawal,
+  rejectWithdrawal,
+  rejectDeposit
 } = require('../controllers/adminController');
 
 // Применяем middleware для всех маршрутов в этом файле
@@ -27,7 +29,8 @@ router.post('/users/:userId/ban', banUser);
 
 // --- Управление Маркетплейсом ---
 router.put('/card-types/:typeId', updateCardType);
-
+router.post('/deposit/:id/reject', rejectDeposit);
+router.post('/withdrawal/:id/reject', rejectWithdrawal);
 // --- Обработка Финансовых Заявок (старая логика) ---
 router.get('/deposits/pending', getPendingDeposits);
 router.post('/deposit/:id/confirm', confirmDeposit);

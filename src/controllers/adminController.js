@@ -5,7 +5,8 @@ const UserCard = require('../models/UserCard');
 const CardType = require('../models/CardType');
 const { updateUserStatus } = require('../utils/userStatusHelper');
 const Notification = require('../models/Notification'); // ИМПОРТ НОВОЙ МОДЕЛИ
-
+const ExchangeOrder = require('../models/ExchangeOrder');
+const ExcelJS = require('exceljs');
 // Вспомогательная функция для безопасного парсинга
 const parseDecimal = (value) => {
     if (value && value.toString) {
@@ -421,5 +422,86 @@ exports.rejectDeposit = async (req, res) => {
         res.json({ message: 'Deposit rejected' });
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+exports.getExchangeHistory = async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = 20;
+        const skip = (page - 1) * limit;
+
+        const orders = await ExchangeOrder.find()
+            .populate('userId', 'username tgId')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+
+        const total = await ExchangeOrder.countDocuments();
+
+        res.json({
+            orders,
+            pagination: { total, page, pages: Math.ceil(total / limit) }
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching exchange history' });
+    }
+};
+
+// 2. ЭКСПОРТ В EXCEL
+exports.exportExchangeToExcel = async (req, res) => {
+    try {
+        const orders = await ExchangeOrder.find()
+            .populate('userId', 'username tgId')
+            .sort({ createdAt: -1 });
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Binance Transactions');
+
+        // Шапка таблицы
+        worksheet.columns = [
+            { header: 'Date', key: 'date', width: 20 },
+            { header: 'User', key: 'user', width: 20 },
+            { header: 'Telegram ID', key: 'tgId', width: 15 },
+            { header: 'Type', key: 'type', width: 10 },
+            { header: 'BTC Amount', key: 'btc', width: 15 },
+            { header: 'App USD Charged', key: 'appUsd', width: 15 },
+            { header: 'Binance USDT Spent', key: 'binanceUsdt', width: 15 },
+            { header: 'Rate (Executed)', key: 'rate', width: 15 },
+            { header: 'Profit Delta ($)', key: 'profit', width: 15 },
+            { header: 'Status', key: 'status', width: 12 },
+            { header: 'Binance ID', key: 'orderId', width: 25 }
+        ];
+
+        // Заполнение данными
+        orders.forEach(o => {
+            worksheet.addRow({
+                date: o.createdAt.toLocaleString(),
+                user: o.userId?.username || 'N/A',
+                tgId: o.userId?.tgId || 'N/A',
+                type: o.type,
+                btc: o.btcAmount.toFixed(8),
+                appUsd: o.appUsdAmount.toFixed(2),
+                binanceUsdt: o.binanceUsdtAmount?.toFixed(2) || 0,
+                rate: o.executedPrice || 0,
+                profit: o.profitDelta?.toFixed(4) || 0,
+                status: o.status,
+                orderId: o.binanceOrderId || 'N/A'
+            });
+        });
+
+        // Стилизация шапки
+        worksheet.getRow(1).font = { bold: true };
+
+        // Отправка файла
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename=Binance_Hedge_Report.xlsx');
+
+        await workbook.xlsx.write(res);
+        res.end();
+
+    } catch (error) {
+        console.error('Excel Export Error:', error);
+        res.status(500).send('Error generating report');
     }
 };

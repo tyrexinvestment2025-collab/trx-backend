@@ -1,74 +1,62 @@
 const cron = require('node-cron');
 const UserCard = require('../models/UserCard');
 const User = require('../models/User');
+const DailyEarning = require('../models/DailyProfit');
 const { getBitcoinPrice } = require('./priceService');
 
 const startCronJobs = () => {
-  console.log('Mining Hub: Pulse services initialized.');
+  console.log('Mining Hub: pulse services active.');
 
-  // ЗАДАЧА 1: LIVE ACCRUAL (SATS & USD)
   cron.schedule('* * * * *', async () => {
     try {
       const activeCards = await UserCard.find({ status: 'Active' }).populate('cardTypeId');
       const btcPrice = getBitcoinPrice(); 
       const minutesInYear = 365 * 24 * 60; 
+      const today = new Date().toISOString().split('T')[0];
 
       for (const card of activeCards) {
         if (!card.cardTypeId) continue;
 
         const nominalSats = parseFloat(card.nominalSats.toString());
-        // Доход в минуту = APY / количество минут в году
         const minuteRate = (card.cardTypeId.clientAPY / 100) / minutesInYear;
-        
-        const minuteProfitSats = nominalSats * minuteRate;
+        const minuteProfitSats = minuteRate * nominalSats;
         const minuteProfitUsd = (minuteProfitSats / 100000000) * btcPrice;
 
         if (minuteProfitSats > 0) {
-          // Обновляем состояние самой карты (ноды)
+          // 1. Обновляем Карту (NFT)
           await UserCard.updateOne({ _id: card._id }, {
-              $inc: { 
-                  currentProfitSats: minuteProfitSats, 
-                  currentProfitUsd: minuteProfitUsd 
-              },
+              $inc: { currentProfitSats: minuteProfitSats, currentProfitUsd: minuteProfitUsd },
               $set: { lastAccrualDate: new Date() }
           });
 
-          // Обновляем статистику пользователя (сколько всего заработал за всё время)
+          // 2. Обновляем общую статистику Юзера
           await User.updateOne({ _id: card.userId }, {
               $inc: { 'balance.totalProfitUsd': minuteProfitUsd }
           });
+
+          // 3. НОВОЕ: Записываем в ежедневный лог (для графиков и "Сегодня")
+          await DailyEarning.updateOne(
+            { userId: card.userId, date: today },
+            { $inc: { miningSats: minuteProfitSats } },
+            { upsert: true }
+          );
         }
       }
-    } catch (e) { console.error('[Mining Hub] Accrual Error:', e); }
+    } catch (e) { console.error('Cron Accrual Error:', e); }
   });
 
-  // ЗАДАЧА 2: VAULT UNLOCK (Cooling -> Finished)
+  // Логика разморозки (Cooling -> Finished) - оставляем без изменений
   cron.schedule('* * * * *', async () => {
-    try {
-      const now = new Date();
-      // Ищем ноды, у которых срок "заморозки" вышел
-      const lockedNodes = await UserCard.find({ status: 'Cooling', unlockAt: { $lte: now } });
-
-      for (const node of lockedNodes) {
+    const now = new Date();
+    const locked = await UserCard.find({ status: 'Cooling', unlockAt: { $lte: now } });
+    for (const node of locked) {
         const price = parseFloat(node.purchasePriceUsd.toString());
-
-        // Атомный возврат ТЕЛА покупки в Wallet пользователя
         await User.updateOne({ _id: node.userId }, {
-            $inc: { 
-                'balance.walletUsd': price,
-                'balance.pendingWithdrawalUsd': -price // Убираем из пендинга
-            }
+            $inc: { 'balance.walletUsd': price, 'balance.pendingWithdrawalUsd': -price }
         });
-
-        // Сбрасываем статус ноды на Inactive (готова к повторной активации или продаже)
-        node.status = 'Inactive';
-        node.currentProfitSats = 0;
-        node.currentProfitUsd = 0;
+        node.status = 'Finished';
         await node.save();
-        
-        console.log(`[Vault] Node ${node._id} unfrozen. Allocation of $${price} returned.`);
-      }
-    } catch (e) { console.error('[Vault] Unlock Error:', e); }
+    }
   });
 };
 

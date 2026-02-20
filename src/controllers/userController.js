@@ -1,74 +1,81 @@
 const User = require('../models/User');
-const UserCard = require('../models/UserCard'); // <--- ВАЖНО: Импорт модели карт
+const UserCard = require('../models/UserCard');
 const WithdrawalRequest = require('../models/WithdrawalRequest');
 const DepositRequest = require('../models/DepositRequest');
-const jwt = require('jsonwebtoken');
+const Notification = require('../models/Notification');
+const DailyEarning = require('../models/DailyProfit'); // Убедись, что модель импортирована
 const { verifyTelegramWebAppData } = require('../utils/telegramAuth');
 const { generateReferralCode } = require('../utils/referralCodeGenerator');
 const { updateUserStatus } = require('../utils/userStatusHelper');
-const { getBitcoinPrice } = require('../services/priceService'); 
 
+// Импортируем экземпляр нашего нового PriceService
+const priceService = require('../services/priceService'); 
+
+/**
+ * Утилита для парсинга Decimal/String в Number
+ */
 const parseDecimal = (value) => {
     if (!value) return 0;
-    const str = value.toString();
-    const num = parseFloat(str);
+    const num = parseFloat(value.toString());
     return isNaN(num) ? 0 : num;
 };
+
+/**
+ * ПОЛУЧЕНИЕ ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ
+ * Включает в себя актуальную цену BTC из WebSocket/REST гибрида
+ */
 exports.getUserProfile = async (req, res) => {
   try {
     const userId = req.user._id;
+    const today = new Date().toISOString().split('T')[0];
 
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
+    // Параллельное выполнение запросов к БД для оптимизации времени ответа
+    const [user, cards, daily] = await Promise.all([
+      User.findById(userId),
+      UserCard.find({ userId }).populate('cardTypeId'),
+      DailyEarning.findOne({ userId, date: today })
+    ]);
+
+    if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Получаем цену через защищенный метод геттер
+    const btcPrice = priceService.getBitcoinPrice(); 
     
-    await updateUserStatus(userId);
-    const updatedUser = await User.findById(userId);
-    
-    const cards = await UserCard.find({ userId: userId }).populate('cardTypeId');
-    const btcPrice = getBitcoinPrice(); 
+    // Если цена === null, значит сервис еще не получил данные от Binance 
+    // или данные старее допустимого порога (30 сек). Отвечаем 503.
+    if (btcPrice === null) {
+        return res.status(503).json({ 
+            message: 'Market data is temporarily unavailable. Please try again.',
+            retryAfter: 5 
+        });
+    }
 
-    // --- НОВОЕ: ПОЛУЧЕНИЕ ТРАНЗАКЦИЙ ---
-    // Берем последние 5 депозитов и 5 выводов
-    const deposits = await DepositRequest.find({ userId }).sort({ createdAt: -1 }).limit(5).lean();
-    const withdrawals = await WithdrawalRequest.find({ userId }).sort({ createdAt: -1 }).limit(5).lean();
-
-    // Приводим к единому формату
-    const formattedDeposits = deposits.map(d => ({
-        ...d,
-        type: 'DEPOSIT',
-        amount: parseFloat(d.amountUsd.toString()) // Используем amountUsd
-    }));
-
-    const formattedWithdrawals = withdrawals.map(w => ({
-        ...w,
-        type: 'WITHDRAWAL',
-        amount: parseFloat(w.amountUsd.toString()) // Используем amountUsd
-    }));
-
-    // Объединяем и сортируем по дате (самые новые сверху)
-    const allTransactions = [...formattedDeposits, ...formattedWithdrawals]
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-        .slice(0, 10); // Оставляем топ-10
-    // ------------------------------------
+    const earnedTodaySats = (daily?.miningSats || 0) + (daily?.referralSats || 0);
 
     res.json({
-      ...JSON.parse(JSON.stringify(updatedUser)),
-      cards: JSON.parse(JSON.stringify(cards)),
-      transactions: allTransactions, // Отправляем на фронт
-      btcPrice: btcPrice 
+      ...user.toObject(),
+      cards,
+      btcPrice, // Гарантированно актуальная цена
+      earnedTodaySats
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server Error' });
+    console.error(`[UserProfile Error]: ${error.message}`);
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 };
 
+/**
+ * ЗАПРОС НА ДЕПОЗИТ
+ */
 exports.requestDeposit = async (req, res) => {
     try {
         const { amountUsd, txHash } = req.body;
-        if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
-
-        if (!amountUsd || !txHash) return res.status(400).json({ message: 'Invalid data' });
+        
+        if (!amountUsd || !txHash) {
+            return res.status(400).json({ message: 'Missing required fields: amountUsd or txHash' });
+        }
 
         await DepositRequest.create({
             userId: req.user._id,
@@ -76,51 +83,63 @@ exports.requestDeposit = async (req, res) => {
             txHash,
             status: 'PENDING'
         });
-        res.status(201).json({ message: 'Deposit requested' });
+
+        res.status(201).json({ message: 'Deposit request submitted successfully' });
     } catch (error) {
+        console.error(`[Deposit Error]: ${error.message}`);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// --- ВЫВОД ---
+/**
+ * ЗАПРОС НА ВЫВОД СРЕДСТВ
+ */
 exports.requestWithdrawal = async (req, res) => {
     try {
         const { amountUsd, walletAddress } = req.body;
-        if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+        const userId = req.user._id;
 
-        const user = await User.findById(req.user._id);
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
         const userWalletUsd = parseDecimal(user.balance.walletUsd);
         const amountToWithdraw = parseFloat(amountUsd);
 
-        if (isNaN(amountToWithdraw) || amountToWithdraw <= 0) return res.status(400).json({ message: 'Invalid amount' });
-        if (userWalletUsd < amountToWithdraw) return res.status(400).json({ message: 'Insufficient balance' });
+        if (isNaN(amountToWithdraw) || amountToWithdraw <= 0) {
+            return res.status(400).json({ message: 'Invalid withdrawal amount' });
+        }
 
-        await WithdrawalRequest.create({
-            userId: user._id,
-            amountUsd: amountToWithdraw.toString(),
-            walletAddress,
-            status: 'PENDING'
-        });
+        if (userWalletUsd < amountToWithdraw) {
+            return res.status(400).json({ message: 'Insufficient balance' });
+        }
 
-        user.balance.walletUsd = (userWalletUsd - amountToWithdraw).toString();
+        // Атомарное обновление баланса пользователя
+        user.balance.walletUsd = (userWalletUsd - amountToWithdraw).toFixed(2);
         const currentPending = parseDecimal(user.balance.pendingWithdrawalUsd);
-        user.balance.pendingWithdrawalUsd = (currentPending + amountToWithdraw).toString();
+        user.balance.pendingWithdrawalUsd = (currentPending + amountToWithdraw).toFixed(2);
 
-        await user.save();
-        res.status(201).json({ message: 'Withdrawal requested' });
+        await Promise.all([
+            user.save(),
+            WithdrawalRequest.create({
+                userId: user._id,
+                amountUsd: amountToWithdraw.toString(),
+                walletAddress,
+                status: 'PENDING'
+            })
+        ]);
+
+        res.status(201).json({ message: 'Withdrawal request created' });
     } catch (error) {
+        console.error(`[Withdrawal Error]: ${error.message}`);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// --- ИСТОРИЯ ---
+/**
+ * ИСТОРИЯ ТРАНЗАКЦИЙ
+ */
 exports.getTransactionHistory = async (req, res) => {
     try {
-        // ЗАЩИТА: проверяем, что юзер авторизован
-        if (!req.user || !req.user._id) {
-            return res.status(401).json({ message: 'Access denied. No user in request.' });
-        }
-
         const userId = req.user._id;
 
         const [deposits, withdrawals] = await Promise.all([
@@ -147,17 +166,18 @@ exports.getTransactionHistory = async (req, res) => {
             }))
         ];
 
+        // Сортировка: сначала новые
         history.sort((a, b) => new Date(b.date) - new Date(a.date));
         res.json(history);
     } catch (error) {
-        console.error('History Error:', error);
+        console.error(`[History Error]: ${error.message}`);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-const Notification = require('../models/Notification');
-
-// Получить уведомления пользователя
+/**
+ * УВЕДОМЛЕНИЯ
+ */
 exports.getNotifications = async (req, res) => {
     try {
         const notifications = await Notification.find({ userId: req.user._id })
@@ -169,11 +189,13 @@ exports.getNotifications = async (req, res) => {
     }
 };
 
-// Отметить все как прочитанные
 exports.markNotificationsRead = async (req, res) => {
     try {
-        await Notification.updateMany({ userId: req.user._id, isRead: false }, { isRead: true });
-        res.json({ message: 'Marked as read' });
+        await Notification.updateMany(
+            { userId: req.user._id, isRead: false }, 
+            { isRead: true }
+        );
+        res.json({ message: 'Success' });
     } catch (error) {
         res.status(500).json({ message: 'Error updating notifications' });
     }

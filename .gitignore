@@ -1,4 +1,5 @@
 .env
+google-credentials.json
 /node_modules
 /assets
 /scripts

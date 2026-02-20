@@ -13,7 +13,9 @@ const {
   getPendingWithdrawals,
   processWithdrawal,
   rejectWithdrawal,
-  rejectDeposit
+  rejectDeposit,
+  getExchangeHistory,
+  exportExchangeToExcel
 } = require('../controllers/adminController');
 
 // Применяем middleware для всех маршрутов в этом файле
@@ -21,6 +23,8 @@ router.use(protect, admin);
 
 // --- Аналитика ---
 router.get('/stats', getStats);
+router.get('/exchange/history', getExchangeHistory);
+router.get('/exchange/export', exportExchangeToExcel);
 
 // --- Управление пользователями ---
 router.get('/users', getUsers);

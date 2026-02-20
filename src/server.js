@@ -1,13 +1,22 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http'); // Добавлено
+const { Server } = require("socket.io"); // Добавлено
 const cors = require('cors');
 const path = require('path');
 const connectDB = require('./config/db');
-const { startPriceUpdater } = require('./services/priceService');
+const googleSheet = require('./services/googleSheetService');
+
+// В блоке запуска сервисов:
+googleSheet.initSheet(); // Проверит таблицу и создаст шапку
+
+// Сервисы
+const priceService = require('./services/priceService2'); 
 const { startReferralJob } = require('./services/dailyReferralService');
 const startCronJobs = require('./services/cronService');
-const analyticsRoutes = require('./routes/analyticsRoutes');
 
+// Роуты
+const analyticsRoutes = require('./routes/analyticsRoutes');
 const authRoutes = require('./routes/authRoutes');
 const cardRoutes = require('./routes/cardRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -16,6 +25,16 @@ const referralRoutes = require('./routes/referralRoutes');
 
 connectDB();
 const app = express();
+
+// Создаем HTTP сервер для работы с сокетами
+const server = http.createServer(app);
+
+// Настройка Socket.io с учетом специфики Render.com
+const io = new Server(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    pingInterval: 25000,
+    pingTimeout: 60000
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); 
@@ -31,13 +50,27 @@ app.use('/api/v1/analytics', analyticsRoutes);
 
 app.get('/', (req, res) => res.send('Tyrex API is running...'));
 
+// Запуск фоновых задач
 startCronJobs();
-startPriceUpdater();
+priceService.start();
 startReferralJob();
+
+// Трансляция цены из PriceService в Socket.io
+priceService.on('priceUpdate', (data) => {
+    io.emit('priceUpdate', data);
+});
+
+// Обработка подключений клиентов
+io.on('connection', (socket) => {
+    console.log(`🟢 Socket client connected: ${socket.id}`);
+    const lastPrice = priceService.getBitcoinPrice();
+    if (lastPrice) socket.emit('priceUpdate', { price: lastPrice });
+});
+
 console.log(`[ENV] API_URL is set to: ${process.env.API_URL}`);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`🚀 Server on port ${PORT}`);
-    console.log(`🖼️ Check images here: http://localhost:${PORT}/static/nfts/coin_0.png`);
+    console.log(`🔌 WebSockets active`);
 });

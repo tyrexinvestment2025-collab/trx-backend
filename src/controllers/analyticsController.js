@@ -1,103 +1,60 @@
 const User = require('../models/User');
+const UserCard = require('../models/UserCard'); // Твоя модель владения картами
+const CardType = require('../models/CardType'); // Твоя модель типов карт (для APY)
 const { getFearAndGreedIndex } = require('../services/marketService');
+const COMPARISON_DATA = require('../config/benchmarks');
 
-// База вопросов (в будущем можно вынести в БД)
-const QUIZ_QUESTIONS = [
-    {
-        id: 1,
-        question: "What happens to Bitcoin mining rewards roughly every 4 years?",
-        options: ["They Double", "They Halve (Halving)", "Stay Same"],
-        correctIndex: 1
-    },
-    {
-        id: 2,
-        question: "Who is the creator of Bitcoin?",
-        options: ["Vitalik Buterin", "Satoshi Nakamoto", "Elon Musk"],
-        correctIndex: 1
-    },
-    {
-        id: 3,
-        question: "What is the maximum supply of Bitcoin?",
-        options: ["21 Million", "100 Million", "Infinite"],
-        correctIndex: 0
-    }
-];
-
-/**
- * GET /api/v1/analytics/dashboard
- * Возвращает данные для экрана аналитики: Индекс страха, доступность квиза
- */
 exports.getAnalyticsDashboard = async (req, res) => {
     try {
-        const user = await User.findById(req.user._id);
-        const fng = await getFearAndGreedIndex();
+        // Загружаем данные параллельно
+        const [user, fng, userCards] = await Promise.all([
+            User.findById(req.user._id).lean(),
+            getFearAndGreedIndex(),
+            // Нам нужно подтянуть данные о типе карты (CardType), чтобы узнать APY каждой карты
+            UserCard.find({ userId: req.user._id, status: 'Active' })
+                .populate('cardTypeId') 
+                .lean()
+        ]);
 
-        // Проверяем, проходил ли сегодня квиз
+        // --- ДИНАМИЧЕСКИЙ СКОРИНГ TYREX ---
+        
+        // 1. Считаем средний APY (Доходность)
+        const avgApy = userCards.length > 0 
+            ? userCards.reduce((acc, card) => {
+                // Берем APY из населенной (populated) модели CardType
+                return acc + (card.cardTypeId ? card.cardTypeId.clientAPY : 0);
+              }, 0) / userCards.length 
+            : 0;
+
+        // 2. Рассчитываем Tyrex Score на основе реальных данных юзера
+        const tyrexScore = {
+            yield: Math.min(95, 60 + (avgApy * 0.5)), // Доходность (база 60 + бонус от APY)
+            liquidity: 80, // Ликвидность (стабильно высокая)
+            entry: 90,     // Порог входа (очень доступно)
+            safety: 100,    // Безопасность
+            passive: 95,   // Пассивность (авто-майнинг)
+            growth: 92     // Рост
+        };
+
+        // --- КВИЗ ЛОГИКА ---
         const today = new Date().setHours(0, 0, 0, 0);
         const lastQuiz = user.lastDailyQuizAt ? new Date(user.lastDailyQuizAt).setHours(0, 0, 0, 0) : 0;
         const isQuizAvailable = lastQuiz < today;
-
-        // Выбираем случайный вопрос для сегодня (или можно по дню года)
-        const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0)) / 1000 / 60 / 60 / 24);
-        const questionOfTheDay = QUIZ_QUESTIONS[dayOfYear % QUIZ_QUESTIONS.length];
-
-        // Убираем правильный ответ, чтобы не палить его на фронт
-        const safeQuestion = { ...questionOfTheDay, correctIndex: undefined };
 
         res.json({
             marketSentiment: fng,
             quiz: {
                 available: isQuizAvailable,
-                data: isQuizAvailable ? safeQuestion : null
+                // Тут выбор вопроса...
+            },
+            analytics: {
+                benchmarks: COMPARISON_DATA,
+                userScore: tyrexScore
             }
         });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Server Error' });
-    }
-};
-
-/**
- * POST /api/v1/analytics/quiz/submit
- * Проверка ответа и начисление награды
- */
-exports.submitQuizAnswer = async (req, res) => {
-    // ЗАЩИТА: Проверяем, есть ли body
-    if (!req.body || typeof req.body.questionId === 'undefined') {
-        return res.status(400).json({ message: 'Invalid data format' });
-    }
-
-    const { questionId, answerIndex } = req.body;
-
-    try {
-        const user = await User.findById(req.user._id);
-        
-        // Проверка на повторное прохождение
-        const today = new Date().setHours(0, 0, 0, 0);
-        const lastQuiz = user.lastDailyQuizAt ? new Date(user.lastDailyQuizAt).setHours(0, 0, 0, 0) : 0;
-
-        if (lastQuiz >= today) {
-            return res.status(400).json({ message: 'Already completed today' });
-        }
-
-        const question = QUIZ_QUESTIONS.find(q => q.id === questionId);
-        if (!question) return res.status(404).json({ message: 'Question not found' });
-
-        const isCorrect = question.correctIndex === answerIndex;
-
-        if (isCorrect) {
-            user.balance.walletSats = (user.balance.walletSats || 0) + 10; // +10 Сатоши
-            user.lastDailyQuizAt = new Date();
-            await user.save();
-            return res.json({ success: true, reward: 10 });
-        } else {
-            user.lastDailyQuizAt = new Date();
-            await user.save();
-            return res.json({ success: false, reward: 0 });
-        }
 
     } catch (error) {
-        console.error(error);
+        console.error('Analytics Error:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };

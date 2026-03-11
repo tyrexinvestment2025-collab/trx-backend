@@ -1,55 +1,62 @@
 const User = require('../models/User');
-const UserCard = require('../models/UserCard'); // Твоя модель владения картами
-const CardType = require('../models/CardType'); // Твоя модель типов карт (для APY)
+const UserCard = require('../models/UserCard');
 const { getFearAndGreedIndex } = require('../services/marketService');
+const priceService = require('../services/priceService'); // Твой сервис цен
 const COMPARISON_DATA = require('../config/benchmarks');
 
 exports.getAnalyticsDashboard = async (req, res) => {
     try {
-        // Загружаем данные параллельно
+        // Получаем текущую цену BTC из твоего сервиса
+        const btcPrice = priceService.getBitcoinPrice() || 60000; 
+
+        // Загружаем данные
         const [user, fng, userCards] = await Promise.all([
             User.findById(req.user._id).lean(),
             getFearAndGreedIndex(),
-            // Нам нужно подтянуть данные о типе карты (CardType), чтобы узнать APY каждой карты
             UserCard.find({ userId: req.user._id, status: 'Active' })
-                .populate('cardTypeId') 
+                .populate('cardTypeId')
                 .lean()
         ]);
 
-        // --- ДИНАМИЧЕСКИЙ СКОРИНГ TYREX ---
+        // --- РАСЧЕТ БАЛАНСА ---
+        // 1. Сумма всех активных карт в USD (основываясь на их покупной стоимости)
+        const cardsValueUsd = userCards.reduce((acc, card) => acc + (parseFloat(card.purchasePriceUsd) || 0), 0);
         
-        // 1. Считаем средний APY (Доходность)
+        // 2. Добавляем баланс кошелька (в предположении, что он есть в user.balance.walletUsd)
+        const walletUsd = user.balance?.walletUsd ? parseFloat(user.balance.walletUsd) : 0;
+        
+        const totalBalanceUsd = cardsValueUsd + walletUsd;
+
+        // --- ДИНАМИЧЕСКИЙ СКОРИНГ TYREX ---
         const avgApy = userCards.length > 0 
-            ? userCards.reduce((acc, card) => {
-                // Берем APY из населенной (populated) модели CardType
-                return acc + (card.cardTypeId ? card.cardTypeId.clientAPY : 0);
-              }, 0) / userCards.length 
+            ? userCards.reduce((acc, card) => acc + (card.cardTypeId?.clientAPY || 0), 0) / userCards.length 
             : 0;
 
-        // 2. Рассчитываем Tyrex Score на основе реальных данных юзера
         const tyrexScore = {
-            yield: Math.min(95, 60 + (avgApy * 0.5)), // Доходность (база 60 + бонус от APY)
-            liquidity: 80, // Ликвидность (стабильно высокая)
-            entry: 90,     // Порог входа (очень доступно)
-            safety: 100,    // Безопасность
-            passive: 95,   // Пассивность (авто-майнинг)
-            growth: 92     // Рост
+            yield: Math.min(95, 60 + (avgApy * 0.5)),
+            liquidity: 80,
+            entry: 90,
+            safety: 100,
+            passive: 95,
+            growth: 92
         };
 
-        // --- КВИЗ ЛОГИКА ---
-        const today = new Date().setHours(0, 0, 0, 0);
-        const lastQuiz = user.lastDailyQuizAt ? new Date(user.lastDailyQuizAt).setHours(0, 0, 0, 0) : 0;
-        const isQuizAvailable = lastQuiz < today;
-
+        // --- ОТВЕТ ДЛЯ ФРОНТЕНДА ---
         res.json({
             marketSentiment: fng,
-            quiz: {
-                available: isQuizAvailable,
-                // Тут выбор вопроса...
-            },
             analytics: {
+                // База для умного алгоритма на фронте
+                currentBalance: totalBalanceUsd,
+                financialGoal: user.analytics?.financialGoal || 50000,
+                baseApy: avgApy,
+                
+                // Данные для бенчмарков (старая логика)
                 benchmarks: COMPARISON_DATA,
                 userScore: tyrexScore
+            },
+            // Данные для квиза (оставляем как было)
+            quiz: {
+                available: (user.lastDailyQuizAt ? new Date(user.lastDailyQuizAt).setHours(0,0,0,0) : 0) < new Date().setHours(0,0,0,0)
             }
         });
 

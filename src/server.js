@@ -6,7 +6,8 @@ const cors = require('cors');
 const path = require('path');
 const connectDB = require('./config/db');
 const googleSheet = require('./services/googleSheetService');
-
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 // В блоке запуска сервисов:
 googleSheet.initSheet(); // Проверит таблицу и создаст шапку
 

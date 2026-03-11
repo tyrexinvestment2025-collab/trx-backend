@@ -14,7 +14,10 @@ const userSchema = new mongoose.Schema({
     enum: ['NEWBIE', 'DEPOSITOR', 'HOLDER', 'MINER'], 
     default: 'NEWBIE' 
   },
-
+  analytics: {
+        financialGoal: { type: Number, default: 50000 }, // Целевая сумма в USD
+        // Можно добавить другие настройки аналитики здесь
+  },
   balance: {
     // USD (Фиатный баланс)
     walletUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },

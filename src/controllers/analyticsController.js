@@ -33,12 +33,12 @@ exports.getAnalyticsDashboard = async (req, res) => {
             : 0;
 
         const tyrexScore = {
-            yield: Math.min(95, 60 + (avgApy * 0.5)),
-            liquidity: 80,
-            entry: 90,
-            safety: 100,
-            passive: 95,
-            growth: 92
+            yield: 90, 
+            safety: 90, 
+            liquidity: 100,
+            passive: 90,
+            entry: 100,
+            growth: 80 
         };
 
         // --- ОТВЕТ ДЛЯ ФРОНТЕНДА ---

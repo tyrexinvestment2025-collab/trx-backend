@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
+const Notification = require('../models/Notification');
 
 exports.getReferralInfo = async (req, res) => {
   try {
@@ -82,4 +83,52 @@ exports.getReferralList = async (req, res) => {
     } catch (e) {
         res.status(500).json({ message: 'Error' });
     }
+};
+
+exports.claimRewards = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+
+    const amountToClaim = user.balance.referralSats || 0;
+
+    if (amountToClaim <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "У вас нет накопленных вознаграждений для сбора." 
+      });
+    }
+
+    // 1. Переводим средства на основной баланс
+    user.balance.sats = (user.balance.sats || 0) + amountToClaim;
+
+    // 2. Обнуляем реферальный баланс
+    user.balance.referralSats = 0;
+
+    // 3. Сохраняем изменения пользователя
+    await user.save();
+
+    // 4. Создаем уведомление с правильными полями (title и message)
+    try {
+        const Notification = require('../models/Notification');
+        await Notification.create({ 
+            userId: user._id, 
+            title: "Винагорода зібрана", // Заголовок (обязательно)
+            message: `Ви успішно зібрали реферальну винагороду в розмірі ${Math.floor(amountToClaim)} SATS` // Сообщение (обязательно)
+        });
+    } catch (notificationError) {
+        // Если уведомление не создалось, не прерываем основной процесс сбора денег
+        console.error('Notification creation failed:', notificationError.message);
+    }
+
+    res.json({
+      success: true,
+      message: "Награды успешно собраны!",
+      claimedAmount: amountToClaim,
+      newBalance: user.balance.sats
+    });
+
+  } catch (error) {
+    console.error('Claim rewards error:', error);
+    res.status(500).json({ success: false, message: "Ошибка при сборе средств." });
+  }
 };

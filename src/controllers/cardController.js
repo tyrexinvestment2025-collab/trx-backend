@@ -241,66 +241,56 @@ exports.sellCardBack = async (req, res) => {
     try {
         const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
         
-        // Защита: продать можно только неактивную карту (майнинг должен быть остановлен)
-        if (!card || card.status !== 'Inactive') {
-            return res.status(400).json({ message: 'Mining must be stopped before selling back' });
+        // Разрешаем продажу, если карта Inactive или Finished
+        if (!card || (card.status !== 'Inactive' && card.status !== 'Finished')) {
+            return res.status(400).json({ message: 'Майнінг має бути зупинений перед продажем' });
         }
 
         const user = await User.findById(card.userId); 
         const nominalBTC = parseDecimal(card.nominalSats) / 100000000;
-        const refundAmount = parseDecimal(card.purchasePriceUsd); // Сумма возврата (сколько он платил при покупке)
+        const refundAmount = parseDecimal(card.purchasePriceUsd); 
 
-        // 1. Финансовая операция в приложении: Возвращаем доллары на кошелек юзера
-        const balanceBefore = parseDecimal(user.balance.walletUsd);
-        user.balance.walletUsd = (balanceBefore + refundAmount).toFixed(2);
-        
-        // 2. ОПЕРАЦИЯ НА БИРЖЕ: Продаем BTC на Binance, чтобы вернуть ликвидность в USDT
-        console.log(`[Exchange] Selling ${nominalBTC.toFixed(8)} BTC back to Binance...`);
+        // 1. Продажа на Binance
         const exchangeResult = await binanceService.executeMarketSell(nominalBTC);
+        
+        // Получаем реальный курс с биржи или рассчитываем его
+        const sellRate = exchangeResult.success 
+            ? parseFloat(exchangeResult.executedPrice || (parseFloat(exchangeResult.receivedUsdt) / nominalBTC))
+            : priceService.getBitcoinPrice();
 
-        // 3. Сохраняем изменения в БД и удаляем карту
+        // 2. Начисляем деньги пользователю
+        user.balance.walletUsd = (parseDecimal(user.balance.walletUsd) + refundAmount).toFixed(2);
+        
+        // 3. Сохраняем и удаляем карту
         await user.save();
         await CardType.findByIdAndUpdate(card.cardTypeId, { $inc: { available: 1 } });
         await UserCard.findByIdAndDelete(card._id);
 
-        // 4. LIVE ЗАПИСЬ В GOOGLE SHEETS
-        // Здесь profit = (сколько реально получили с биржи в USDT - сколько отдали юзеру в USD)
-        const realReceivedUsdt = exchangeResult.success ? parseFloat(exchangeResult.receivedUsdt) : 0;
-        
+        // 4. Лог в Google Sheets
         googleSheet.appendOrder({
             username: user.username || user.tgId,
             type: 'SELL (Refund)',
             btcAmount: nominalBTC,
             appUsd: refundAmount,
-            binanceUsdt: realReceivedUsdt,
-            rate: exchangeResult.success ? (realReceivedUsdt / nominalBTC).toFixed(2) : 0,
+            binanceUsdt: exchangeResult.success ? parseFloat(exchangeResult.receivedUsdt) : 0,
+            rate: sellRate,
             status: exchangeResult.success ? 'SUCCESS' : 'FAILED',
-            profit: exchangeResult.success ? (realReceivedUsdt - refundAmount) : 0,
+            profit: exchangeResult.success ? (parseFloat(exchangeResult.receivedUsdt) - refundAmount) : 0,
             orderId: exchangeResult.orderId || 'N/A'
         });
 
-        // Лог в консоль сервера
-        console.log(`
-        ==================================================
-        📉 [REFUND & SELL BACK COMPLETED]
-        ==================================================
-        👤 User:      ${user.username || user.tgId}
-        📦 Volume:    ${nominalBTC.toFixed(8)} BTC
-        💵 Refunded:  $${refundAmount.toFixed(2)} USD
-        🏛️ Binance:   ${exchangeResult.success ? '✅ Sold for $' + realReceivedUsdt : '❌ Failed'}
-        📊 PNL:       $${(realReceivedUsdt - refundAmount).toFixed(4)}
-        ==================================================
-        `);
-
+        // Возвращаем данные для фронтенда
         res.json({ 
-            message: 'Card sold back successfully', 
-            refundAmount, 
-            exchange: exchangeResult.success 
+            success: true,
+            message: 'Карту успішно продано', 
+            amount: refundAmount.toFixed(2), 
+            rate: sellRate.toLocaleString(),
+            isExchangeSuccess: exchangeResult.success 
         });
 
     } catch (e) { 
         console.error('❌ [sellCardBack Error]:', e.message);
-        res.status(500).json({ message: 'Error during sell back' }); 
+        res.status(500).json({ message: 'Помилка під час продажу' }); 
     }
 };
 

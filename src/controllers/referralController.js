@@ -6,54 +6,46 @@ exports.getReferralInfo = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
     
+    // Перевірка наявності карт у самого користувача (для розблокування)
     const hasCards = await UserCard.exists({ userId: user._id });
-
     if (!hasCards) {
-        return res.json({ 
-            isLocked: true,
-            message: "Purchase a miner to unlock your invite link." 
-        });
+        return res.json({ isLocked: true });
     }
 
-    const botName = process.env.TELEGRAM_BOT_NAME || 'tyrexcurrency_bot'; 
-    const appName = process.env.TELEGRAM_APP_NAME || 'ereeefewefwefwef'; // <-- Вот твое короткое имя
-    const referralLink = `https://t.me/${botName}/${appName}?startapp=${user.referralCode}`;
+    const referralLink = `https://t.me/${process.env.TELEGRAM_BOT_NAME}/${process.env.TELEGRAM_APP_NAME}?startapp=${user.referralCode}`;
 
-    const myReferrals = await User.find({ uplineUserId: user._id }).select('_id');
+    // Знаходимо всіх рефералів 1-ї лінії
+    const myReferrals = await User.find({ uplineUserId: user._id });
     const referralIds = myReferrals.map(u => u._id);
 
-    const activeMinersCount = await UserCard.distinct('userId', {
-      userId: { $in: referralIds },
-      status: 'Active'
-    });
+    // 1. КАПІТАЛ ПАРТНЕРІВ (Сума всіх куплених карт рефералами)
+    const activeCards = await UserCard.find({ userId: { $in: referralIds } });
+    const totalPartnerCapital = activeCards.reduce((sum, card) => {
+        return sum + parseFloat(card.purchasePriceUsd.toString() || 0);
+    }, 0);
 
-    const allRefCards = await UserCard.find({
-        userId: { $in: referralIds },
-        status: 'Active'
-    }).populate('cardTypeId');
+    // 2. КАПІТАЛ НЕ В РОБОТІ (Сума walletUsd на балансах рефералів)
+    const totalIdleCapital = myReferrals.reduce((sum, u) => {
+        return sum + parseFloat(u.balance.walletUsd.toString() || 0);
+    }, 0);
 
-    let dailyPassiveSats = 0;
-
-    for (const card of allRefCards) {
-        if (card.cardTypeId) {
-            const nominal = parseFloat(card.nominalSats.toString());
-            const refApy = card.cardTypeId.referralAPY || 0;
-            
-            const income = (nominal * (refApy / 100)) / 365;
-            dailyPassiveSats += income;
-        }
-    }
-
-    const monthlyPassiveSats = dailyPassiveSats * 30;
+    // 3. СТАТИСТИКА РЕЄСТРАЦІЙ
+    const totalInvited = myReferrals.length;
+    // Кількість тих, хто купив хоча б одну карту
+    const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds } });
+    const nonInvestorsCount = totalInvited - investorsCount.length;
 
     res.json({
         isLocked: false,
         referralLink,
         totalEarnedSats: user.balance.referralSats || 0,
+        apr: 15.5, // Можна розраховувати динамічно або брати з конфігу
         stats: {
-            totalInvited: referralIds.length,
-            activeMiners: activeMinersCount.length,
-            estMonthlyIncomeBtc: monthlyPassiveSats / 100000000 
+            totalInvited,
+            investorsCount: investorsCount.length,
+            nonInvestorsCount,
+            totalPartnerCapital,
+            totalIdleCapital
         }
     });
   } catch (error) {
@@ -63,12 +55,10 @@ exports.getReferralInfo = async (req, res) => {
 
 exports.getReferralList = async (req, res) => {
     try {
-        const referrals = await User.find({ uplineUserId: req.user._id })
-            .sort({ createdAt: -1 })
-            .limit(50)
-            .select('username createdAt');
-
+        const referrals = await User.find({ uplineUserId: req.user._id }).sort({ createdAt: -1 });
         const refIds = referrals.map(r => r._id);
+        
+        // Знаходимо активні карти для кожного
         const activeIds = await UserCard.distinct('userId', { userId: { $in: refIds }, status: 'Active' });
         const activeSet = new Set(activeIds.map(id => id.toString()));
 
@@ -76,7 +66,11 @@ exports.getReferralList = async (req, res) => {
             id: r._id,
             username: r.username || 'Anonymous',
             registeredAt: r.createdAt,
-            isActive: activeSet.has(r._id.toString())
+            isActive: activeSet.has(r._id.toString()),
+            idleBalance: parseFloat(r.balance.walletUsd.toString()).toFixed(2),
+            // Загальна сума інвестицій (якщо треба для розширеної інфи)
+            // Примітка: для швидкості краще рахувати це агрегацією, але поки так:
+            totalInvestment: 0 
         }));
 
         res.json(list);

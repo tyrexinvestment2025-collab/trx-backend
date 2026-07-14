@@ -55,26 +55,38 @@ exports.getReferralInfo = async (req, res) => {
 
 exports.getReferralList = async (req, res) => {
     try {
+        // Отримуємо рефералів користувача
         const referrals = await User.find({ uplineUserId: req.user._id }).sort({ createdAt: -1 });
         const refIds = referrals.map(r => r._id);
         
-        // Знаходимо активні карти для кожного
-        const activeIds = await UserCard.distinct('userId', { userId: { $in: refIds }, status: 'Active' });
-        const activeSet = new Set(activeIds.map(id => id.toString()));
+        // Отримуємо всі карти цих рефералів за один запит (для швидкості)
+        const allUserCards = await UserCard.find({ userId: { $in: refIds } });
 
-        const list = referrals.map(r => ({
-            id: r._id,
-            username: r.username || 'Anonymous',
-            registeredAt: r.createdAt,
-            isActive: activeSet.has(r._id.toString()),
-            idleBalance: parseFloat(r.balance.walletUsd.toString()).toFixed(2),
-            // Загальна сума інвестицій (якщо треба для розширеної інфи)
-            // Примітка: для швидкості краще рахувати це агрегацією, але поки так:
-            totalInvestment: 0 
-        }));
+        const list = referrals.map(r => {
+            // Фільтруємо карти конкретного реферала
+            const userCards = allUserCards.filter(c => c.userId.toString() === r._id.toString());
+            
+            // Рахуємо загальну суму інвестицій (Правка ТУТ)
+            const totalInvestment = userCards.reduce((sum, card) => {
+                return sum + parseFloat(card.purchasePriceUsd.toString() || 0);
+            }, 0);
+
+            // Перевіряємо чи є активний майнінг
+            const isActive = userCards.some(c => c.status === 'Active');
+
+            return {
+                id: r._id,
+                username: r.username || 'Anonymous',
+                registeredAt: r.createdAt,
+                isActive: isActive,
+                idleBalance: parseFloat(r.balance.walletUsd.toString() || 0).toFixed(2),
+                totalInvestment: totalInvestment.toFixed(2) // ТЕПЕР ТУТ РЕАЛЬНІ ДАНІ
+            };
+        });
 
         res.json(list);
     } catch (e) {
+        console.error(e);
         res.status(500).json({ message: 'Error' });
     }
 };

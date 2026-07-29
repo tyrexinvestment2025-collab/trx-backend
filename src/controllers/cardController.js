@@ -4,6 +4,7 @@ const CardHistory = require('../models/CardHistory');
 const User = require('../models/User');
 const ExchangeOrder = require('../models/ExchangeOrder'); // Импорт новой модели
 const googleSheet = require('../services/googleSheetService'); // Добавлено
+const Notification = require('../models/Notification'); // Імпортуємо модель сповіщень
 
 // Импортируем Singleton сервис цены
 const priceService = require('../services/priceService2'); 
@@ -309,4 +310,77 @@ exports.getCardHistoryBySerial = async (req, res) => {
         
         res.json(history);
     } catch (e) { res.status(500).json({ message: 'Error fetching history' }); }
+};
+
+exports.activateTrialCard = async (req, res) => {
+    try {
+        const user = await User.findOneAndUpdate(
+            { _id: req.user._id, isTrialActivated: false },
+            { $set: { isTrialActivated: true, trialActivatedAt: new Date() } },
+            { new: true }
+        );
+
+        if (!user) {
+            return res.status(400).json({ message: "Ви вже отримали свій подарунок!" });
+        }
+
+        const miniType = await CardType.findOne({ name: { $regex: /^Tyrex Mini$/i } });
+        if (!miniType) {
+            await User.updateOne({ _id: req.user._id }, { $set: { isTrialActivated: false } });
+            return res.status(404).json({ message: "Серія 'Tyrex Mini' не знайдена" });
+        }
+
+        const takenCards = await UserCard.find({ cardTypeId: miniType._id }).distinct('serialNumber');
+        const allPossibleNumbers = Array.from({ length: miniType.maxSupply }, (_, i) => i + 1);
+        const availableNumbers = allPossibleNumbers.filter(num => !takenCards.includes(num));
+
+        if (availableNumbers.length === 0) {
+            await User.updateOne({ _id: req.user._id }, { $set: { isTrialActivated: false } });
+            return res.status(400).json({ message: "Всі монети вже розібрані!" });
+        }
+
+        const randomSerialNumber = availableNumbers[Math.floor(Math.random() * availableNumbers.length)];
+        const expiryDate = new Date();
+        expiryDate.setDate(expiryDate.getDate() + 30);
+
+        // --- ВИПРАВЛЕННЯ ТУТ: Додаємо базовий URL ---
+        const baseUrl = getBaseUrl(req); 
+        const finalImageUrl = `${baseUrl}${miniType.imagePath}`;
+
+        const trialCard = new UserCard({
+            userId: user._id,
+            cardTypeId: miniType._id,
+            serialNumber: randomSerialNumber,
+            status: 'Active',
+            nominalSats: miniType.nominalSats,
+            purchasePriceUsd: 0,
+            isTrial: true,
+            imageUrl: finalImageUrl, // Зберігаємо повний шлях
+            unlockAt: expiryDate,
+            lastAccrualDate: new Date()
+        });
+
+        await trialCard.save();
+        await CardType.updateOne({ _id: miniType._id }, { $inc: { available: -1 } });
+
+        await Notification.create({
+            userId: user._id,
+            title: "🌟 ТВОЯ УДАЧА ПОСМІХНУЛАСЯ!",
+            message: `Ви витягнули унікальну монету Tyrex Mini!\n\n💎 ВАШ НОМЕР: #${randomSerialNumber}`,
+            type: 'INFO'
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Вітаємо! Ваш щасливий номер #${randomSerialNumber}`,
+            card: {
+                ...trialCard.toObject(),
+                imageUrl: finalImageUrl // Віддаємо повний шлях на фронт
+            }
+        });
+
+    } catch (error) {
+        console.error('[Trial Error]:', error);
+        res.status(500).json({ message: "Помилка при виборі карти" });
+    }
 };

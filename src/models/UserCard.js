@@ -12,6 +12,10 @@ const userCardSchema = new mongoose.Schema({
   nominalSats: { type: mongoose.Schema.Types.Decimal128, required: true },
   purchasePriceUsd: { type: mongoose.Schema.Types.Decimal128, required: true },
   currentProfitUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
+  currentProfitSats: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
+  
+  isTrial: { type: Boolean, default: false }, // Если true — это подарочная монета
+
   imageUrl: { type: String },
   unlockAt: { type: Date },
   lastAccrualDate: { type: Date, default: Date.now }

@@ -11,6 +11,7 @@ const {
   stopCard,
   sellCardBack,
   getCardHistoryBySerial,
+  activateTrialCard
 } = require('../controllers/cardController');
 
 router.get('/types', getCardTypes);
@@ -20,6 +21,7 @@ router.post('/buy', protect, buyCard);
 router.get('/types/:id/items', getCollectionItems); 
 router.get('/history/:typeId/:serial', getCardHistoryBySerial);
 router.post('/:id/sell-back', protect, sellCardBack);
+router.post('/activate-trial', protect, activateTrialCard); 
 
 router.post('/:id/stop', protect, stopCard);
 router.post('/:id/start', protect, startCard);

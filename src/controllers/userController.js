@@ -1,3 +1,4 @@
+const axios = require('axios');
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const WithdrawalRequest = require('../models/WithdrawalRequest');
@@ -198,5 +199,34 @@ exports.markNotificationsRead = async (req, res) => {
         res.json({ message: 'Success' });
     } catch (error) {
         res.status(500).json({ message: 'Error updating notifications' });
+    }
+};
+
+exports.checkSubscription = async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        const CHANNEL_ID = '-1001968067961'; // или ID канала (начинается с -100...)
+        const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+        // Запрос к Telegram API
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${CHANNEL_ID}&user_id=${user.tgId}`;
+        
+        const response = await axios.get(url);
+        const status = response.data.result.status;
+
+        // Статусы, которые считаются "подписан"
+        const isMember = ['member', 'administrator', 'creator'].includes(status);
+
+        if (isMember) {
+            // Можно сразу помечать в базе, что задание выполнено
+            // user.tasks.isSubscribed = true;
+            // await user.save();
+            return res.json({ success: true, status });
+        } else {
+            return res.json({ success: false, message: 'Ви не підписані на канал' });
+        }
+    } catch (error) {
+        console.error('Subscription check error:', error.response?.data || error.message);
+        res.status(400).json({ success: false, message: 'Не вдалося перевірити підписку' });
     }
 };

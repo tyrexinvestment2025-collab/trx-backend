@@ -7,6 +7,7 @@ const { getBitcoinPrice } = require('./priceService');
 const startCronJobs = () => {
   console.log('Mining Hub: pulse services active.');
 
+  // 1. НАЧИСЛЕНИЕ ПРИБЫЛИ (Раз в минуту)
   cron.schedule('* * * * *', async () => {
     try {
       const activeCards = await UserCard.find({ status: 'Active' }).populate('cardTypeId');
@@ -23,18 +24,18 @@ const startCronJobs = () => {
         const minuteProfitUsd = (minuteProfitSats / 100000000) * btcPrice;
 
         if (minuteProfitSats > 0) {
-          // 1. Обновляем Карту (NFT)
           await UserCard.updateOne({ _id: card._id }, {
-              $inc: { currentProfitSats: minuteProfitSats, currentProfitUsd: minuteProfitUsd },
+              $inc: { 
+                currentProfitSats: minuteProfitSats, 
+                currentProfitUsd: minuteProfitUsd 
+              },
               $set: { lastAccrualDate: new Date() }
           });
 
-          // 2. Обновляем общую статистику Юзера
           await User.updateOne({ _id: card.userId }, {
               $inc: { 'balance.totalProfitUsd': minuteProfitUsd }
           });
 
-          // 3. НОВОЕ: Записываем в ежедневный лог (для графиков и "Сегодня")
           await DailyEarning.updateOne(
             { userId: card.userId, date: today },
             { $inc: { miningSats: minuteProfitSats } },
@@ -45,17 +46,41 @@ const startCronJobs = () => {
     } catch (e) { console.error('Cron Accrual Error:', e); }
   });
 
-  // Логика разморозки (Cooling -> Finished) - оставляем без изменений
+  // 2. ОТКЛЮЧЕНИЕ ТРИАЛЬНЫХ КАРТ И РАЗМОРОЗКА (Раз в минуту)
   cron.schedule('* * * * *', async () => {
-    const now = new Date();
-    const locked = await UserCard.find({ status: 'Cooling', unlockAt: { $lte: now } });
-    for (const node of locked) {
-        const price = parseFloat(node.purchasePriceUsd.toString());
-        await User.updateOne({ _id: node.userId }, {
-            $inc: { 'balance.walletUsd': price, 'balance.pendingWithdrawalUsd': -price }
+    try {
+        const now = new Date();
+
+        // А) Завершаем ТРИАЛЬНЫЕ карты, у которых вышел срок (1 месяц)
+        const expiredTrials = await UserCard.find({ 
+            isTrial: true, 
+            status: 'Active', 
+            unlockAt: { $lte: now } 
         });
-        node.status = 'Finished';
-        await node.save();
+
+        for (const trial of expiredTrials) {
+            trial.status = 'Finished';
+            await trial.save();
+            console.log(`[Trial] Card ${trial._id} expired and deactivated.`);
+        }
+
+        // Б) Обычная логика разморозки стейкинга (Cooling -> Finished)
+        const locked = await UserCard.find({ 
+            status: 'Cooling', 
+            unlockAt: { $lte: now },
+            isTrial: false // Только для купленных карт
+        });
+
+        for (const node of locked) {
+            const price = parseFloat(node.purchasePriceUsd.toString());
+            await User.updateOne({ _id: node.userId }, {
+                $inc: { 'balance.walletUsd': price, 'balance.pendingWithdrawalUsd': -price }
+            });
+            node.status = 'Finished';
+            await node.save();
+        }
+    } catch (e) {
+        console.error('Cron Expiration Error:', e);
     }
   });
 };

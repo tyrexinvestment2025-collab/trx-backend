@@ -3,26 +3,57 @@ const UserCard = require('../models/UserCard');
 const ReferralReward = require('../models/ReferralReward');
 const mongoose = require('mongoose');
 
-// --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ ДАННЫХ (ТОЛЬКО ДЛЯ ТЕСТОВ) ---
-const autoSeedHistory = async (uplineId, partnerId) => {
-    const count = await ReferralReward.countDocuments({ uplineUserId: uplineId, partnerUserId: partnerId });
-    if (count > 0) return; // Если данные уже есть, ничего не делаем
-
-    console.log(`[AutoSeed] Generating history for partner ${partnerId}...`);
-    const rewards = [];
+/**
+ * Визначає статус партнера на основі його активності
+ */
+const getPartnerStatusInfo = (partner, partnerCards) => {
     const now = new Date();
+    const hasPaidCard = partnerCards.some(c => !c.isTrial && (c.status === 'Active' || c.status === 'Cooling'));
+    const trialCard = partnerCards.find(c => c.isTrial);
+    const idleBalance = parseFloat(partner.balance.walletUsd?.toString() || 0);
+    const totalProfit = parseFloat(partner.balance.totalProfitUsd?.toString() || 0);
 
-    for (let i = 0; i < 14; i++) {
-        const date = new Date();
-        date.setDate(now.getDate() - i);
-        rewards.push({
-            uplineUserId: uplineId,
-            partnerUserId: partnerId,
-            amountSats: Math.floor(Math.random() * 2500) + 500,
-            date: date.toISOString().split('T')[0]
-        });
+    if (!partner.isTrialActivated) {
+        return {
+            status: 'NOT_ACTIVATED', label: 'НЕ АКТИВОВАНО', color: '#FF4141',
+            description: 'Клієнт ще не активував вітальну монету. Допоможіть йому почати.'
+        };
     }
-    await ReferralReward.insertMany(rewards);
+
+    if (partner.isTrialActivated && !hasPaidCard && trialCard) {
+        const daysSince = Math.floor((now - partner.trialActivatedAt) / (1000 * 60 * 60 * 24));
+        const daysLeft = 7 - daysSince;
+        if (daysLeft > 0) {
+            return {
+                status: 'WAITING', label: `ПЕРШИЙ ДОХІД ЧЕРЕЗ ${daysLeft}дн`, color: '#FFB700',
+                description: `Клієнт тестує систему. На балансі вже $${totalProfit.toFixed(2)}.`
+            };
+        }
+    }
+
+    if (partner.isTrialActivated && !hasPaidCard) {
+        return {
+            status: 'INVEST', label: 'ЧАС ІНВЕСТУВАТИ', color: '#FF7000',
+            description: 'Тестовий період завершено. Час придбати першу реальну NFT.'
+        };
+    }
+
+    const hasActivePaid = partnerCards.some(c => !c.isTrial && c.status === 'Active');
+    if (idleBalance > 10 && !hasActivePaid) {
+        return {
+            status: 'GROW', label: 'ЧАС ЗРОСТАТИ', color: '#A855F7',
+            description: 'У клієнта є вільні кошти. Запропонуйте йому розширити потужності.'
+        };
+    }
+
+    if (hasActivePaid) {
+        return {
+            status: 'WORKING', label: 'ГРОШІ ПРАЦЮЮТЬ', color: '#22C55E',
+            description: 'Активний інвестор. Все працює в штатному режимі.'
+        };
+    }
+
+    return { status: 'UNKNOWN', label: 'В ПРОЦЕСІ', color: '#94A3B8', description: 'Клієнт вивчає платформу.' };
 };
 
 exports.getReferralInfo = async (req, res) => {
@@ -33,7 +64,7 @@ exports.getReferralInfo = async (req, res) => {
         if (!hasCards) return res.json({ isLocked: true });
 
         const botName = process.env.TELEGRAM_BOT_NAME || 'tyrexcurrency_bot'; 
-        const appName = process.env.TELEGRAM_APP_NAME || 'ereeefewefwefwef'; 
+        const appName = process.env.TELEGRAM_APP_NAME || 'app'; 
         const referralLink = `https://t.me/${botName}/${appName}?startapp=${user.referralCode}`;
 
         const myReferrals = await User.find({ uplineUserId: user._id });
@@ -42,7 +73,7 @@ exports.getReferralInfo = async (req, res) => {
         const activeCards = await UserCard.find({ userId: { $in: referralIds }, status: 'Active' });
         const totalPartnerCapital = activeCards.reduce((sum, card) => sum + parseFloat(card.purchasePriceUsd.toString() || 0), 0);
         const totalIdleCapital = myReferrals.reduce((sum, u) => sum + parseFloat(u.balance.walletUsd.toString() || 0), 0);
-        const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds } });
+        const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds }, isTrial: false });
 
         res.json({
             isLocked: false,
@@ -66,14 +97,8 @@ exports.getReferralList = async (req, res) => {
         const referrals = await User.find({ uplineUserId: req.user._id }).sort({ createdAt: -1 });
         const refIds = referrals.map(r => r._id);
 
-        // 1. АВТО-ЗАПОЛНЕНИЕ: Если ты админ или тестер, создаем данные для каждого партнера
-        // В продакшене эту часть можно будет удалить
-        for (const ref of referrals) {
-            await autoSeedHistory(req.user._id, ref._id);
-        }
-
         const [allCards, allRewards] = await Promise.all([
-            UserCard.find({ userId: { $in: refIds } }),
+            UserCard.find({ userId: { $in: refIds } }).populate('cardTypeId'),
             ReferralReward.find({ uplineUserId: req.user._id, partnerUserId: { $in: refIds } }).lean()
         ]);
 
@@ -81,24 +106,56 @@ exports.getReferralList = async (req, res) => {
             const userCards = allCards.filter(c => c.userId.toString() === r._id.toString());
             const userRewards = allRewards.filter(rew => rew.partnerUserId.toString() === r._id.toString());
             
-            const totalEarnedFromHim = userRewards.reduce((sum, rew) => sum + rew.amountSats, 0);
+            const totalEarnedFromHimSats = userRewards.reduce((sum, rew) => sum + rew.amountSats, 0);
+            const statusInfo = getPartnerStatusInfo(r, userCards);
 
-            // Группировка для "Биржевого" графика
+            // --- ФОРМУЄМО ІНВЕНТАР МОНЕТ ---
+            const inventory = {
+                bought: userCards.filter(c => !c.isTrial).map(c => ({
+                    name: c.cardTypeId?.name || 'Unknown Node',
+                    serial: c.serialNumber,
+                    status: c.status
+                })),
+                staked: userCards.filter(c => c.status === 'Active').map(c => ({
+                    name: c.cardTypeId?.name || 'Unknown Node',
+                    serial: c.serialNumber,
+                    isTrial: c.isTrial
+                }))
+            };
+
+            // Группування РЕАЛЬНИХ даних для графіка
             const chartData = userRewards.reduce((acc, rew) => {
-                const existing = acc.find(a => a.date === rew.date);
+                const dateStr = rew.date || new Date(rew.createdAt).toISOString().split('T')[0];
+                const existing = acc.find(a => a.date === dateStr);
                 if (existing) existing.val += rew.amountSats;
-                else acc.push({ date: rew.date, val: rew.amountSats });
+                else acc.push({ date: dateStr, val: rew.amountSats });
                 return acc;
             }, []);
 
             return {
                 id: r._id,
                 username: r.username || 'Anonymous',
-                registeredAt: r.createdAt,
-                isActive: userCards.some(c => c.status === 'Active'),
-                idleBalance: parseFloat(r.balance.walletUsd.toString() || 0).toFixed(2),
-                totalInvestment: userCards.reduce((sum, c) => sum + parseFloat(c.purchasePriceUsd.toString()), 0).toFixed(2),
-                myProfitFromHimBTC: (totalEarnedFromHim / 100000000).toFixed(8),
+                tgUsername: r.username,
+                registrationDate: r.createdAt,
+                
+                // CRM
+                statusLabel: statusInfo.label,
+                statusColor: statusInfo.color,
+                statusDescription: statusInfo.description,
+
+                // Фінанси
+                depositedAmount: parseFloat(r.totalDepositedUsd?.toString() || 0).toFixed(2),
+                totalPartnerIncome: parseFloat(r.balance.totalProfitUsd?.toString() || 0).toFixed(2),
+                idleBalance: parseFloat(r.balance.walletUsd?.toString() || 0).toFixed(2),
+                myProfitFromHimBTC: (totalEarnedFromHimSats / 100000000).toFixed(8),
+                
+                // Детальний список монет
+                inventory,
+
+                // Повідомлення (без кнопки на фронті, але дані є)
+                messageTemplate: `Привіт! Бачу, ти вже заробив $${parseFloat(r.balance.totalProfitUsd?.toString() || 0).toFixed(2)} на тесті. Пора активувати реальну NFT!`,
+
+                // Реальний графік (сортований по даті)
                 chartData: chartData.sort((a,b) => a.date.localeCompare(b.date)).slice(-14)
             };
         });
@@ -106,7 +163,7 @@ exports.getReferralList = async (req, res) => {
         res.json(list);
     } catch (e) {
         console.error(e);
-        res.status(500).json({ message: 'Error' });
+        res.status(500).json({ message: 'Error fetching list' });
     }
 };
 
@@ -116,7 +173,7 @@ exports.claimRewards = async (req, res) => {
         const amountToClaim = user.balance.referralSats || 0;
 
         if (amountToClaim <= 0) {
-            return res.status(400).json({ success: false, message: "У вас нет накопленных наград." });
+            return res.status(400).json({ success: false, message: "Немає нагород для збору." });
         }
 
         user.balance.walletSats = (user.balance.walletSats || 0) + amountToClaim;

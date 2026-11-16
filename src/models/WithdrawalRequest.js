@@ -6,7 +6,8 @@ const withdrawalRequestSchema = new mongoose.Schema({
   status: { type: String, enum: ['PENDING', 'PROCESSED', 'REJECTED'], default: 'PENDING' },
   walletAddress: { type: String, required: true },
   processedDate: { type: Date },
-  adminComment: { type: String }
+  adminComment: { type: String },
+  payoutTxHash: { type: String } // хэш выплаты (админ указывает при «Выплачено»)
 }, {
   timestamps: true
 });

@@ -10,6 +10,7 @@ const priceService = require('../services/priceService2');
 const binanceService = require('../services/binanceService');
 const { updateUserStatus } = require('../utils/userStatusHelper');
 const { toNum, round2, dec, isObjectId } = require('../utils/money');
+const events = require('../bot/events');
 
 const SATS_IN_BTC = 100000000;
 const COOLING_DAYS = Number(process.env.COOLING_DAYS) || 30;
@@ -201,6 +202,7 @@ exports.buyCard = async (req, res) => {
         debited = 0;
 
         await CardHistory.create({ cardTypeId, serialNumber, userId: user._id, eventType: 'PURCHASE', priceUsd: costUSD.toFixed(2) });
+        await events.cardBought(card, type, user);
         await updateUserStatus(user._id);
 
         res.status(201).json({ message: 'Success', card });
@@ -455,6 +457,8 @@ exports.activateTrialCard = async (req, res) => {
             key: 'trial_activated',
             params: { serial: trialCard.serialNumber }
         });
+        await User.updateOne({ _id: user._id }, { $set: { channelGiftAt: new Date() } });
+        await events.trialActivated(trialCard, miniType, user._id);
 
         res.json({
             success: true,

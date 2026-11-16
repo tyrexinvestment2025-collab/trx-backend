@@ -35,7 +35,24 @@ const userSchema = new mongoose.Schema({
     lastDailyQuizAt: { type: Date, default: null },
     referralSats: { type: Number, default: 0 } 
   },
-  isBanned: { type: Boolean, default: false }
+  isBanned: { type: Boolean, default: false },
+
+  // --- Бот и уведомления ---
+  firstName: { type: String, default: '' },            // имя из Telegram — для «По вашей ссылке пришёл …»
+  lang: { type: String, enum: ['ru', 'uk', 'en', null], default: null }, // выбранный язык (бот и приложение); null — ещё не выбран
+  canMessage: { type: Boolean, default: false },        // нажал Start или разрешил писать из Mini App
+  botBlockedAt: { type: Date, default: null },
+  timezone: { type: String, default: 'Europe/Kyiv' },
+  notifPrefs: {
+    cards: { type: Boolean, default: true },
+    partners: { type: Boolean, default: true },
+    news: { type: Boolean, default: true },
+    digest: { type: Boolean, default: false },
+    btc: { type: Boolean, default: false }
+  },
+  pendingRef: { type: String, default: null },          // реф-код из /start до первого входа в приложение
+  source: { type: String, default: null },              // ref / ch_<пост> / p_<раздел> / direct
+  channelGiftAt: { type: Date, default: null }
 }, {
   timestamps: true
 });

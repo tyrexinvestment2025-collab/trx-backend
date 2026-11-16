@@ -51,6 +51,9 @@ app.use('/api/v1/analytics', analyticsRoutes);
 
 app.get('/', (req, res) => res.send('Tyrex API is running...'));
 
+// Telegram-бот: вебхук, очередь уведомлений, админ-чат
+require('./bot').initBot(app);
+
 // Запуск фоновых задач
 if (process.env.DISABLE_CRON !== 'true') {
     startCronJobs();

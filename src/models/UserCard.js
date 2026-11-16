@@ -22,7 +22,7 @@ const userCardSchema = new mongoose.Schema({
   unlockAt: { type: Date },
   lastAccrualDate: { type: Date, default: Date.now },
   // «Напомнить»: бот пишет за сутки до конца цикла (unlockAt)
-  remindBeforeEnd: { type: Boolean, default: false },
+  remindBeforeEnd: { type: Boolean, default: true }, // напоминание за сутки до конца паузы/срока (выключается в аналитике)
   remindSentAt: { type: Date }
 }, { timestamps: true });
 

@@ -9,6 +9,14 @@ const ExchangeOrder = require('../models/ExchangeOrder');
 const ExcelJS = require('exceljs');
 const { toNum, round2, dec, isObjectId } = require('../utils/money');
 const parseDecimal = toNum;
+const requestService = require('../services/requestService');
+const actorOf = (req) => ({ userId: req.user?._id, tgId: req.user?.tgId, username: req.user?.username, source: 'admin_panel' });
+const sendResult = (res, r, okMessage) => {
+  if (r.ok) return res.json({ message: okMessage });
+  if (r.code === 'INVALID_ID') return res.status(400).json({ message: 'Invalid id' });
+  if (r.code === 'NOT_FOUND') return res.status(404).json({ message: 'Not found' });
+  return res.status(400).json({ message: 'Request is not pending' });
+};
 
 // Получить заявки на пополнение
 exports.getPendingDeposits = async (req, res) => {
@@ -81,36 +89,7 @@ exports.getPendingWithdrawals = async (req, res) => {
 // Статус меняется атомарно: повторный клик / параллельный запрос не зачислит деньги дважды
 exports.confirmDeposit = async (req, res) => {
   try {
-    if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid id' });
-    const deposit = await DepositRequest.findOneAndUpdate(
-      { _id: req.params.id, status: 'PENDING' },
-      { $set: { status: 'CONFIRMED' } },
-      { new: true }
-    );
-    if (!deposit) return res.status(400).json({ message: 'Request is not pending' });
-
-    const amount = round2(toNum(deposit.amountUsd));
-    const user = await User.findOneAndUpdate(
-      { _id: deposit.userId },
-      { $inc: { 'balance.walletUsd': dec(amount), totalDepositedUsd: dec(amount) } },
-      { new: true }
-    );
-    if (!user) {
-      await DepositRequest.updateOne({ _id: deposit._id }, { $set: { status: 'REJECTED', adminComment: 'User not found' } });
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    await Notification.create({
-        userId: user._id,
-        title: 'Deposit Confirmed',
-        message: `Your account has been topped up by $${amount.toFixed(2)}.`,
-        type: 'DEPOSIT',
-        key: 'deposit_confirmed',
-        params: { amount }
-    });
-
-    await updateUserStatus(user._id);
-    res.json({ message: 'Deposit confirmed and notification sent' });
+    sendResult(res, await requestService.confirmDeposit(req.params.id, actorOf(req)), 'Deposit confirmed and notification sent');
   } catch (error) {
     console.error('confirmDeposit error:', error);
     res.status(500).json({ message: 'Server Error' });
@@ -119,28 +98,7 @@ exports.confirmDeposit = async (req, res) => {
 
 exports.processWithdrawal = async (req, res) => {
   try {
-    if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid id' });
-    const withdrawal = await WithdrawalRequest.findOneAndUpdate(
-      { _id: req.params.id, status: 'PENDING' },
-      { $set: { status: 'PROCESSED', processedDate: new Date() } },
-      { new: true }
-    );
-    if (!withdrawal) return res.status(400).json({ message: 'Request is not pending' });
-
-    const amount = round2(toNum(withdrawal.amountUsd));
-    // Деньги уже списаны с кошелька при создании заявки — убираем их из pending
-    await User.updateOne({ _id: withdrawal.userId }, { $inc: { 'balance.pendingWithdrawalUsd': dec(-amount) } });
-
-    await Notification.create({
-        userId: withdrawal.userId,
-        title: 'Withdrawal Processed',
-        message: `Your withdrawal of $${amount.toFixed(2)} has been processed.`,
-        type: 'WITHDRAWAL',
-        key: 'withdrawal_processed',
-        params: { amount }
-    });
-
-    res.json({ message: 'Withdrawal processed and notification sent' });
+    sendResult(res, await requestService.markWithdrawalPaid(req.params.id, req.body?.txHash, actorOf(req)), 'Withdrawal processed and notification sent');
   } catch (error) {
     console.error('processWithdrawal error:', error);
     res.status(500).json({ message: 'Server Error' });
@@ -280,15 +238,11 @@ exports.getUserFullReport = async (req, res) => {
  */
 exports.banUser = async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-
-    user.isBanned = !user.isBanned;
-    await user.save();
-
-    res.status(200).json({ 
-      message: `Пользователь ${user.isBanned ? 'забанен' : 'разбанен'}.`,
-      isBanned: user.isBanned
+    const r = await requestService.toggleBan(req.params.userId, actorOf(req));
+    if (!r.ok) return res.status(r.code === 'INVALID_ID' ? 400 : 404).json({ message: 'User not found' });
+    res.status(200).json({
+      message: `Пользователь ${r.user.isBanned ? 'забанен' : 'разбанен'}.`,
+      isBanned: r.user.isBanned
     });
   } catch (error) {
     res.status(500).json({ message: 'Server Error' });
@@ -354,33 +308,7 @@ exports.updateCardType = async (req, res) => {
 
 exports.rejectWithdrawal = async (req, res) => {
     try {
-        const { id } = req.params;
-        if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid id' });
-        const adminComment = String(req.body?.adminComment || '').slice(0, 500) || 'Rejected by admin';
-
-        const withdrawal = await WithdrawalRequest.findOneAndUpdate(
-            { _id: id, status: 'PENDING' },
-            { $set: { status: 'REJECTED', adminComment } },
-            { new: true }
-        );
-        if (!withdrawal) return res.status(400).json({ message: 'Request not pending' });
-
-        const amount = round2(toNum(withdrawal.amountUsd));
-        // Возвращаем деньги из pending в кошелёк
-        await User.updateOne({ _id: withdrawal.userId }, {
-            $inc: { 'balance.walletUsd': dec(amount), 'balance.pendingWithdrawalUsd': dec(-amount) }
-        });
-
-        await Notification.create({
-            userId: withdrawal.userId,
-            title: 'Withdrawal Rejected',
-            message: `Your withdrawal request was rejected. Reason: ${adminComment}. Funds have been returned to your balance.`,
-            type: 'WITHDRAWAL',
-            key: 'withdrawal_rejected',
-            params: { amount, reason: adminComment }
-        });
-
-        res.json({ message: 'Withdrawal rejected and funds returned' });
+        sendResult(res, await requestService.rejectWithdrawal(req.params.id, req.body?.adminComment, actorOf(req)), 'Withdrawal rejected and funds returned');
     } catch (error) {
         console.error('rejectWithdrawal error:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -389,28 +317,7 @@ exports.rejectWithdrawal = async (req, res) => {
 // ОТКЛОНИТЬ ПОПОЛНЕНИЕ
 exports.rejectDeposit = async (req, res) => {
     try {
-        const { id } = req.params;
-        if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid id' });
-        const adminComment = String(req.body?.adminComment || '').slice(0, 500) || 'Transaction not found or invalid';
-
-        const deposit = await DepositRequest.findOneAndUpdate(
-            { _id: id, status: 'PENDING' },
-            { $set: { status: 'REJECTED', adminComment } },
-            { new: true }
-        );
-        if (!deposit) return res.status(400).json({ message: 'Request not pending' });
-
-        const amount = round2(toNum(deposit.amountUsd));
-        await Notification.create({
-            userId: deposit.userId,
-            title: 'Deposit Rejected',
-            message: `Your deposit request for $${amount.toFixed(2)} was rejected. Reason: ${adminComment}`,
-            type: 'DEPOSIT',
-            key: 'deposit_rejected',
-            params: { amount, reason: adminComment }
-        });
-
-        res.json({ message: 'Deposit rejected' });
+        sendResult(res, await requestService.rejectDeposit(req.params.id, req.body?.adminComment, actorOf(req)), 'Deposit rejected');
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
     }

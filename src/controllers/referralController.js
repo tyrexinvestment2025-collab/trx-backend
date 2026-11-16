@@ -1,3 +1,4 @@
+const { refLink } = require('../bot/config');
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const ReferralReward = require('../models/ReferralReward');
@@ -65,9 +66,8 @@ exports.getReferralInfo = async (req, res) => {
         
         if (!hasCards) return res.json({ isLocked: true });
 
-        const botName = process.env.TELEGRAM_BOT_NAME || 'tyrexcurrency_bot'; 
-        const appName = process.env.TELEGRAM_APP_NAME || 'app'; 
-        const referralLink = `https://t.me/${botName}/${appName}?startapp=${user.referralCode}`;
+        // Одна форма реф-ссылки для приложения и бота: сразу в Mini App, startapp=ref_<код>
+        const referralLink = refLink(user.referralCode);
 
         const myReferrals = await User.find({ uplineUserId: user._id });
         const referralIds = myReferrals.map(u => u._id);

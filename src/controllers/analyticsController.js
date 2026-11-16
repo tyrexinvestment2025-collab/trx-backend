@@ -11,7 +11,7 @@ const COMPARISON_DATA = require('../config/benchmarks');
 const { METRICS, TYREX_SCORE, SCORES_UPDATED_AT, BTC_SCENARIOS } = require('../config/benchmarks');
 const QUIZ = require('../config/quiz');
 const { toNum, round2, isObjectId } = require('../utils/money');
-const { pickLang } = require('../services/botNotifier');
+const { langOf: pickLang } = require('../bot/texts');
 
 const SATS_IN_BTC = 100000000;
 const DAYS_BACK = 366;
@@ -127,7 +127,7 @@ const buildUpcoming = async (userId) => {
         at: c.unlockAt,
         amountUsd: c.isTrial ? 0 : round2(toNum(c.purchasePriceUsd) + toNum(c.coolingPayoutUsd)),
         profitUsd: c.isTrial ? 0 : round2(toNum(c.coolingPayoutUsd)),
-        remind: Boolean(c.remindBeforeEnd)
+        remind: c.remindBeforeEnd !== false
     }));
 };
 

@@ -2,6 +2,8 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { verifyTelegramWebAppData } = require('../utils/telegramAuth');
 const { generateReferralCode } = require('../utils/referralCodeGenerator');
+const { findOrCreateUser, langFromCode } = require('../services/userService');
+const events = require('../bot/events');
 const { updateUserStatus } = require('../utils/userStatusHelper');
 
 const getAdminIds = () => (process.env.ADMIN_IDS || '')
@@ -34,51 +36,11 @@ exports.login = async (req, res) => {
     // Роль вычисляется при каждом входе: изменения ADMIN_IDS применяются и к старым пользователям
     const role = getAdminIds().includes(String(telegramUser.id)) ? 'ADMIN' : 'USER';
 
-    // 3. Ищем пользователя
-    let user = await User.findOne({ tgId: telegramUser.id });
-
-    // --- ЕСЛИ ПОЛЬЗОВАТЕЛЬ НОВЫЙ ---
-    if (!user) {
-        let uplineId = null;
-
-        if (startParam) {
-            const inviter = await User.findOne({ referralCode: startParam });
-            if (inviter && inviter.tgId !== telegramUser.id) {
-                uplineId = inviter._id;
-            }
-        }
-
-        let newCode = generateReferralCode();
-        while (await User.findOne({ referralCode: newCode })) {
-            newCode = generateReferralCode();
-        }
-
-        // Стартовый бонус настраивается через env (по умолчанию 0)
-        const signupBonus = Number(process.env.SIGNUP_BONUS_USD) || 0;
-
-        const newUser = new User({
-            tgId: telegramUser.id,
-            username: telegramUser.username || `User${telegramUser.id}`,
-            role,
-            languageCode: telegramUser.language_code || 'en',
-            referralCode: newCode,
-            uplineUserId: uplineId,
-            balance: { walletUsd: signupBonus.toFixed(2) },
-            accountStatus: 'NEWBIE'
-        });
-
-        try {
-            await newUser.save();
-            user = newUser;
-        } catch (error) {
-            // 11000 = параллельный запрос уже создал пользователя
-            if (error.code === 11000) {
-                user = await User.findOne({ tgId: telegramUser.id });
-            } else {
-                throw error;
-            }
-        }
-    }
+    // 3. Находим или создаём пользователя (та же функция, что и для /start в боте).
+    //    Реф-код из start_param (ref_<код> или старый формат <код>) засчитывается только новому пользователю.
+    const { user: found, created, inviter } = await findOrCreateUser(telegramUser, { startPayload: startParam, via: 'app' });
+    let user = found;
+    if (created && inviter) await events.referralJoined(inviter._id, user);
 
     if (!user) {
         return res.status(500).json({ message: 'User creation failed due to concurrency' });
@@ -94,6 +56,10 @@ exports.login = async (req, res) => {
     if (user.role !== role) updates.role = role;
     if (telegramUser.language_code && telegramUser.language_code !== user.languageCode) updates.languageCode = telegramUser.language_code;
     if (!user.referralCode) updates.referralCode = generateReferralCode();
+    if (telegramUser.first_name && telegramUser.first_name !== user.firstName) updates.firstName = String(telegramUser.first_name).slice(0, 64);
+    if (!user.lang) updates.lang = langFromCode(telegramUser.language_code);
+    // initData сообщает, разрешил ли пользователь боту писать (allows_write_to_pm)
+    if (telegramUser.allows_write_to_pm === true && !user.canMessage) { updates.canMessage = true; updates.botBlockedAt = null; }
     if (Object.keys(updates).length) {
         user = await User.findByIdAndUpdate(user._id, { $set: updates }, { new: true });
     }

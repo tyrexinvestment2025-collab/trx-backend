@@ -8,7 +8,9 @@ const {
     getTransactionHistory,
     getNotifications,
     markNotificationsRead,
-    checkSubscription
+    checkSubscription,
+    updateBotAccess,
+    updatePrefs
  } = require('../controllers/userController');
 
 router.get('/me', protect, getUserProfile);
@@ -18,5 +20,7 @@ router.get('/history', protect, getTransactionHistory);
 router.get('/notifications',protect, getNotifications);
 router.post('/notifications/read', protect, markNotificationsRead);
 router.post('/check-subscription', protect, checkSubscription);
+router.post('/bot-access', protect, updateBotAccess);
+router.patch('/prefs', protect, updatePrefs);
 
 module.exports = router;

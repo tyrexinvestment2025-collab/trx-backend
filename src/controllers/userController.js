@@ -8,6 +8,7 @@ const DailyEarning = require('../models/DailyProfit');
 const IncomeEvent = require('../models/IncomeEvent');
 const priceService = require('../services/priceService2');
 const { toNum, round2, dec } = require('../utils/money');
+const events = require('../bot/events');
 
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || '-1001968067961';
 const MIN_WITHDRAWAL_USD = Number(process.env.MIN_WITHDRAWAL_USD) || 10;
@@ -73,6 +74,51 @@ exports.getUserProfile = async (req, res) => {
   }
 };
 
+const PREF_KEYS = ['cards', 'partners', 'news', 'digest', 'btc'];
+const LANGS = ['ru', 'uk', 'en'];
+const isTimeZone = (tz) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
+
+/**
+ * POST /user/bot-access { allowed, timezone }
+ * Mini App сообщает, может ли бот писать пользователю (allows_write_to_pm / requestWriteAccess),
+ * и часовой пояс для тихих часов.
+ */
+exports.updateBotAccess = async (req, res) => {
+  try {
+    const $set = {};
+    if (typeof req.body?.allowed === 'boolean') {
+      $set.canMessage = req.body.allowed;
+      if (req.body.allowed) $set.botBlockedAt = null;
+    }
+    const tz = String(req.body?.timezone || '');
+    if (tz && tz.length <= 64 && isTimeZone(tz)) $set.timezone = tz;
+    if (Object.keys($set).length) await User.updateOne({ _id: req.user._id }, { $set });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+/**
+ * PATCH /user/prefs { lang?, notifPrefs? }
+ * Язык и группы уведомлений — общие для бота и приложения.
+ */
+exports.updatePrefs = async (req, res) => {
+  try {
+    const $set = {};
+    if (LANGS.includes(req.body?.lang)) $set.lang = req.body.lang;
+    const p = req.body?.notifPrefs;
+    if (p && typeof p === 'object') {
+      for (const k of PREF_KEYS) if (typeof p[k] === 'boolean') $set[`notifPrefs.${k}`] = p[k];
+    }
+    if (!Object.keys($set).length) return res.status(400).json({ message: 'Nothing to update' });
+    const user = await User.findByIdAndUpdate(req.user._id, { $set }, { new: true }).select('lang notifPrefs').lean();
+    res.json({ success: true, lang: user.lang, notifPrefs: user.notifPrefs });
+  } catch (e) {
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
 /**
  * ЗАПРОС НА ДЕПОЗИТ
  * Адрес общий, поэтому зачисление подтверждает админ вручную после проверки транзакции.
@@ -93,7 +139,8 @@ exports.requestDeposit = async (req, res) => {
         const duplicate = await DepositRequest.exists({ txHash, status: { $ne: 'REJECTED' } });
         if (duplicate) return res.status(409).json({ message: 'This transaction was already submitted', code: 'DUPLICATE_TX' });
 
-        await DepositRequest.create({ userId: req.user._id, amountUsd: amount.toFixed(2), txHash, status: 'PENDING' });
+        const deposit = await DepositRequest.create({ userId: req.user._id, amountUsd: amount.toFixed(2), txHash, status: 'PENDING' });
+        await events.depositCreated(deposit);
 
         res.status(201).json({ message: 'Deposit request submitted successfully' });
     } catch (error) {
@@ -128,14 +175,16 @@ exports.requestWithdrawal = async (req, res) => {
         );
         if (!user) return res.status(400).json({ message: 'Insufficient balance', code: 'INSUFFICIENT_BALANCE' });
 
+        let withdrawal;
         try {
-            await WithdrawalRequest.create({ userId: user._id, amountUsd: amount.toFixed(2), walletAddress, status: 'PENDING' });
+            withdrawal = await WithdrawalRequest.create({ userId: user._id, amountUsd: amount.toFixed(2), walletAddress, status: 'PENDING' });
         } catch (e) {
             // Компенсация, если заявка не создалась
             await User.updateOne({ _id: user._id }, { $inc: { 'balance.walletUsd': dec(amount), 'balance.pendingWithdrawalUsd': dec(-amount) } });
             throw e;
         }
 
+        await events.withdrawalCreated(withdrawal);
         res.status(201).json({ message: 'Withdrawal request created' });
     } catch (error) {
         console.error(`[Withdrawal Error]: ${error.message}`);

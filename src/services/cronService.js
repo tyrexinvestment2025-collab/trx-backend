@@ -7,7 +7,7 @@ const priceService = require('./priceService2');
 const { toNum, round2, dec } = require('../utils/money');
 const IncomeEvent = require('../models/IncomeEvent');
 const Notification = require('../models/Notification');
-const { notifyUser } = require('./botNotifier');
+const events = require('../bot/events');
 
 const MS_IN_YEAR = 365 * 24 * 60 * 60 * 1000;
 const SATS_IN_BTC = 100000000;
@@ -77,8 +77,7 @@ const processExpirations = async () => {
     if (!claimed) return;
     const params = { cardName: trial.cardTypeId?.name || 'Tyrex', serial: trial.serialNumber };
     await Notification.create({ userId: trial.userId, title: 'Gift card finished', message: `${params.cardName} #${params.serial}`, type: 'INFO', key: 'trial_finished', params }).catch(() => {});
-    const user = await User.findById(trial.userId).select('tgId languageCode').lean();
-    await notifyUser(user, 'trial_finished', params);
+    await events.trialFinished(claimed, params.cardName);
   });
 
   // Б) Охлаждение закончилось: выплачиваем тело + зафиксированную прибыль.
@@ -106,20 +105,21 @@ const processExpirations = async () => {
       meta: { cardId: claimed._id, serialNumber: claimed.serialNumber, cardName: params.cardName, principalUsd: principal, profitUsd: profit }
     }).catch(e => console.error('[IncomeEvent]', e.message));
     await Notification.create({ userId: claimed.userId, title: 'Cycle finished', message: `+$${params.amount}`, type: 'INFO', key: 'card_payout', params }).catch(() => {});
-    const user = await User.findById(claimed.userId).select('tgId languageCode').lean();
-    await notifyUser(user, 'card_payout', params);
+    await events.cycleEnded(claimed, { cardName: params.cardName, serial: params.serial, amount: payout, principal, profit });
   });
 };
 
 /**
- * «Напомнить»: за сутки до конца цикла (выплата после охлаждения или конец подарочной карты)
- * бот пишет пользователю. Атомарная пометка remindSentAt — сообщение уходит один раз.
+ * card.cycle_ending: за сутки до конца паузы (выплата) или срока подарочной карты бот пишет пользователю.
+ * Включено по умолчанию; переключатель «Напомнить» в аналитике выключает его для карты (remindBeforeEnd: false),
+ * группа «Карты» в настройках — для всех карт. Тихие часы соблюдает очередь.
+ * Атомарная пометка remindSentAt — сообщение ставится в очередь один раз.
  */
 const processReminders = async () => {
   const now = new Date();
   const soon = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   const due = await UserCard.find({
-    remindBeforeEnd: true, remindSentAt: null,
+    remindBeforeEnd: { $ne: false }, remindSentAt: null,
     unlockAt: { $gt: now, $lte: soon },
     $or: [{ status: 'Cooling' }, { status: 'Active', isTrial: true }]
   }).populate('cardTypeId', 'name').lean();
@@ -131,12 +131,12 @@ const processReminders = async () => {
       { new: true }
     ).lean();
     if (!claimed) return;
-    const user = await User.findById(card.userId).select('tgId languageCode').lean();
-    await notifyUser(user, 'cycle_tomorrow', {
+    await events.cycleEnding(card, {
       cardName: card.cardTypeId?.name || 'Tyrex',
       serial: card.serialNumber,
       trial: Boolean(card.isTrial),
-      amount: round2(toNum(card.purchasePriceUsd) + toNum(card.coolingPayoutUsd)).toFixed(2)
+      at: card.unlockAt,
+      amount: round2(toNum(card.purchasePriceUsd) + toNum(card.coolingPayoutUsd))
     });
   });
 };

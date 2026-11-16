@@ -79,12 +79,19 @@ exports.getReferralInfo = async (req, res) => {
         const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds }, isTrial: { $ne: true } });
 
         const types = await CardType.find({ isActive: true }).select('referralAPY').lean();
+        const claimedAgg = await IncomeEvent.aggregate([
+            { $match: { userId: user._id, type: 'REFERRAL_CLAIM' } },
+            { $group: { _id: null, sats: { $sum: '$meta.sats' } } }
+        ]);
+        const claimedSats = claimedAgg[0]?.sats || 0;
         const refApys = types.map(t => t.referralAPY || 0);
 
         res.json({
             isLocked: false,
             referralLink,
-            totalEarnedSats: user.balance.referralSats || 0,
+            // Всего заработано = ещё не забрано + старые «застрявшие» сатоши + уже забранное (по журналу доходов)
+            totalEarnedSats: (user.balance.referralSats || 0) + (user.balance.walletSats || 0) + claimedSats,
+            availableSats: (user.balance.referralSats || 0) + (user.balance.walletSats || 0),
             referralApyMin: refApys.length ? Math.min(...refApys) : 0,
             referralApyMax: refApys.length ? Math.max(...refApys) : 0,
             stats: {

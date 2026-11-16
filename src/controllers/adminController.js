@@ -300,6 +300,19 @@ exports.banUser = async (req, res) => {
  * @route   PUT /api/v1/admin/card-types/:typeId
  * @access  Private (Admin)
  */
+/**
+ * @desc    Все серии карт, включая неактивные (витрина /cards/types отдаёт только активные)
+ * @route   GET /api/v1/admin/card-types
+ */
+exports.getAllCardTypes = async (req, res) => {
+    try {
+        const types = await CardType.find().sort({ nominalSats: 1 }).lean();
+        res.json(types.map(t => ({ ...t, id: t._id, nominalSats: toNum(t.nominalSats) })));
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 exports.updateCardType = async (req, res) => {
     try {
         const { typeId } = req.params;

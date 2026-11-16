@@ -8,6 +8,7 @@ const {
   getUserFullReport,
   banUser,
   updateCardType,
+  getAllCardTypes,
   getPendingDeposits,
   confirmDeposit,
   getPendingWithdrawals,
@@ -32,6 +33,7 @@ router.get('/users/:userId/full-report', getUserFullReport);
 router.post('/users/:userId/ban', banUser);
 
 // --- Управление Маркетплейсом ---
+router.get('/card-types', getAllCardTypes);
 router.put('/card-types/:typeId', updateCardType);
 router.post('/deposit/:id/reject', rejectDeposit);
 router.post('/withdrawal/:id/reject', rejectWithdrawal);

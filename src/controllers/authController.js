@@ -60,6 +60,7 @@ exports.login = async (req, res) => {
             tgId: telegramUser.id,
             username: telegramUser.username || `User${telegramUser.id}`,
             role,
+            languageCode: telegramUser.language_code || 'en',
             referralCode: newCode,
             uplineUserId: uplineId,
             balance: { walletUsd: signupBonus.toFixed(2) },
@@ -91,6 +92,7 @@ exports.login = async (req, res) => {
     const updates = {};
     if (telegramUser.username && telegramUser.username !== user.username) updates.username = telegramUser.username;
     if (user.role !== role) updates.role = role;
+    if (telegramUser.language_code && telegramUser.language_code !== user.languageCode) updates.languageCode = telegramUser.language_code;
     if (!user.referralCode) updates.referralCode = generateReferralCode();
     if (Object.keys(updates).length) {
         user = await User.findByIdAndUpdate(user._id, { $set: updates }, { new: true });

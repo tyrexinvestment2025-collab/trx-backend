@@ -4,6 +4,7 @@ const CardHistory = require('../models/CardHistory');
 const User = require('../models/User');
 const ExchangeOrder = require('../models/ExchangeOrder');
 const Notification = require('../models/Notification');
+const IncomeEvent = require('../models/IncomeEvent');
 const googleSheet = require('../services/googleSheetService');
 const priceService = require('../services/priceService2');
 const binanceService = require('../services/binanceService');
@@ -333,6 +334,11 @@ exports.sellCardBack = async (req, res) => {
             { new: true }
         );
         await CardType.updateOne({ _id: card.cardTypeId }, { $inc: { available: 1 } });
+        const soldType = await CardType.findById(card.cardTypeId).select('name').lean();
+        await IncomeEvent.create({
+            userId: req.user._id, type: 'CARD_REFUND', amountUsd: dec(refundAmount),
+            meta: { cardId: card._id, serialNumber: card.serialNumber, cardName: soldType?.name }
+        }).catch(e => console.error('[IncomeEvent]', e.message));
         await CardHistory.create({
             cardTypeId: card.cardTypeId, serialNumber: card.serialNumber, userId: req.user._id,
             eventType: 'SOLD_BACK', priceUsd: refundAmount.toFixed(2)

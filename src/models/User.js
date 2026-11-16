@@ -4,6 +4,7 @@ const { generateReferralCode } = require('../utils/referralCodeGenerator');
 const userSchema = new mongoose.Schema({
   tgId: { type: Number, required: true, unique: true, index: true },
   username: { type: String, default: '' },
+  languageCode: { type: String, default: 'en' }, // из Telegram initData, для сообщений бота
   role: { type: String, enum: ['USER', 'ADMIN'], default: 'USER' },
   
   referralCode: { type: String, unique: true, sparse: true },

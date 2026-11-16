@@ -5,6 +5,7 @@ const WithdrawalRequest = require('../models/WithdrawalRequest');
 const DepositRequest = require('../models/DepositRequest');
 const Notification = require('../models/Notification');
 const DailyEarning = require('../models/DailyProfit');
+const IncomeEvent = require('../models/IncomeEvent');
 const priceService = require('../services/priceService2');
 const { toNum, round2, dec } = require('../utils/money');
 
@@ -149,9 +150,10 @@ exports.getTransactionHistory = async (req, res) => {
     try {
         const userId = req.user._id;
 
-        const [deposits, withdrawals] = await Promise.all([
+        const [deposits, withdrawals, incomes] = await Promise.all([
             DepositRequest.find({ userId }).lean(),
-            WithdrawalRequest.find({ userId }).lean()
+            WithdrawalRequest.find({ userId }).lean(),
+            IncomeEvent.find({ userId }).sort({ createdAt: -1 }).limit(200).lean()
         ]);
 
         const history = [
@@ -172,6 +174,16 @@ exports.getTransactionHistory = async (req, res) => {
                 date: w.createdAt,
                 meta: w.walletAddress,
                 adminComment: w.adminComment || null
+            })),
+            ...incomes.map(i => ({
+                id: i._id,
+                type: 'INCOME',
+                subtype: i.type,
+                amount: toNum(i.amountUsd),
+                status: 'CONFIRMED',
+                date: i.createdAt,
+                meta: null,
+                details: i.meta || {}
             }))
         ];
 

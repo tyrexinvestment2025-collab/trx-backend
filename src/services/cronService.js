@@ -1,9 +1,13 @@
 const cron = require('node-cron');
 const UserCard = require('../models/UserCard');
+const CardType = require('../models/CardType');
 const User = require('../models/User');
 const DailyEarning = require('../models/DailyProfit');
 const priceService = require('./priceService2');
 const { toNum, round2, dec } = require('../utils/money');
+const IncomeEvent = require('../models/IncomeEvent');
+const Notification = require('../models/Notification');
+const { notifyUser } = require('./botNotifier');
 
 const MS_IN_YEAR = 365 * 24 * 60 * 60 * 1000;
 const SATS_IN_BTC = 100000000;
@@ -65,11 +69,17 @@ const accrueProfits = async () => {
 const processExpirations = async () => {
   const now = new Date();
 
-  // А) Пробные карты с истёкшим сроком
-  await UserCard.updateMany(
-    { isTrial: true, status: 'Active', unlockAt: { $lte: now } },
-    { $set: { status: 'Finished' } }
-  );
+  // А) Пробные карты с истёкшим сроком (атомарно по одной — чтобы уведомить ровно один раз)
+  const expiredTrials = await UserCard.find({ isTrial: true, status: 'Active', unlockAt: { $lte: now } })
+    .populate('cardTypeId', 'name').lean();
+  await inBatches(expiredTrials, async (trial) => {
+    const claimed = await UserCard.findOneAndUpdate({ _id: trial._id, status: 'Active' }, { $set: { status: 'Finished' } });
+    if (!claimed) return;
+    const params = { cardName: trial.cardTypeId?.name || 'Tyrex', serial: trial.serialNumber };
+    await Notification.create({ userId: trial.userId, title: 'Gift card finished', message: `${params.cardName} #${params.serial}`, type: 'INFO', key: 'trial_finished', params }).catch(() => {});
+    const user = await User.findById(trial.userId).select('tgId languageCode').lean();
+    await notifyUser(user, 'trial_finished', params);
+  });
 
   // Б) Охлаждение закончилось: выплачиваем тело + зафиксированную прибыль.
   //    Переход статуса атомарный — выплата произойдёт ровно один раз.
@@ -82,10 +92,22 @@ const processExpirations = async () => {
     );
     if (!claimed) return;
 
-    const payout = round2(toNum(claimed.purchasePriceUsd) + toNum(claimed.coolingPayoutUsd));
+    const principal = round2(toNum(claimed.purchasePriceUsd));
+    const profit = round2(toNum(claimed.coolingPayoutUsd));
+    const payout = round2(principal + profit);
     await User.updateOne({ _id: claimed.userId }, {
       $inc: { 'balance.walletUsd': dec(payout), 'balance.pendingWithdrawalUsd': dec(-payout) }
     });
+
+    const cardType = await CardType.findById(claimed.cardTypeId).select('name').lean();
+    const params = { cardName: cardType?.name || 'Tyrex', serial: claimed.serialNumber, amount: payout.toFixed(2), principal: principal.toFixed(2), profit: profit.toFixed(2) };
+    await IncomeEvent.create({
+      userId: claimed.userId, type: 'CARD_PAYOUT', amountUsd: dec(payout),
+      meta: { cardId: claimed._id, serialNumber: claimed.serialNumber, cardName: params.cardName, principalUsd: principal, profitUsd: profit }
+    }).catch(e => console.error('[IncomeEvent]', e.message));
+    await Notification.create({ userId: claimed.userId, title: 'Cycle finished', message: `+$${params.amount}`, type: 'INFO', key: 'card_payout', params }).catch(() => {});
+    const user = await User.findById(claimed.userId).select('tgId languageCode').lean();
+    await notifyUser(user, 'card_payout', params);
   });
 };
 

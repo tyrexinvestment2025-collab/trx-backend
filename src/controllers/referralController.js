@@ -2,6 +2,9 @@ const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const ReferralReward = require('../models/ReferralReward');
 const CardType = require('../models/CardType');
+const IncomeEvent = require('../models/IncomeEvent');
+const priceService = require('../services/priceService2');
+const { round2, dec } = require('../utils/money');
 
 /**
  * Визначає статус партнера на основі його активності
@@ -172,21 +175,33 @@ exports.getReferralList = async (req, res) => {
 
 exports.claimRewards = async (req, res) => {
     try {
-        const user = await User.findById(req.user._id).lean();
-        const amountToClaim = user?.balance?.referralSats || 0;
+        const btcPrice = priceService.getBitcoinPrice();
+        if (btcPrice === null) return res.status(503).json({ success: false, code: 'PRICE_UNAVAILABLE' });
 
-        if (amountToClaim <= 0) {
+        const user = await User.findById(req.user._id).lean();
+        const refSats = user?.balance?.referralSats || 0;
+        // walletSats раньше копился при claim, но нигде не тратился — забираем и его
+        const legacySats = user?.balance?.walletSats || 0;
+        const totalSats = refSats + legacySats;
+        const amountUsd = round2((totalSats / 100000000) * btcPrice);
+
+        if (totalSats <= 0 || amountUsd < 0.01) {
             return res.status(400).json({ success: false, code: 'NOTHING_TO_CLAIM', message: 'Nothing to claim' });
         }
 
         // Условное обновление: если параллельный claim уже забрал сумму — ничего не произойдёт
         const r = await User.updateOne(
-            { _id: req.user._id, 'balance.referralSats': amountToClaim },
-            { $inc: { 'balance.walletSats': amountToClaim, 'balance.referralSats': -amountToClaim } }
+            { _id: req.user._id, 'balance.referralSats': refSats, 'balance.walletSats': user.balance.walletSats },
+            { $inc: { 'balance.walletUsd': dec(amountUsd), 'balance.referralSats': -refSats, 'balance.walletSats': -legacySats } }
         );
         if (r.modifiedCount !== 1) return res.status(409).json({ success: false, code: 'CONFLICT' });
 
-        res.json({ success: true, claimedAmount: amountToClaim });
+        await IncomeEvent.create({
+            userId: req.user._id, type: 'REFERRAL_CLAIM', amountUsd: dec(amountUsd),
+            meta: { sats: totalSats, btcPrice }
+        }).catch(e => console.error('[IncomeEvent]', e.message));
+
+        res.json({ success: true, claimedSats: totalSats, claimedUsd: amountUsd, btcPrice });
     } catch (error) {
         res.status(500).json({ success: false });
     }

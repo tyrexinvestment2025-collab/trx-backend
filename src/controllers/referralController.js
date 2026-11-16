@@ -1,7 +1,7 @@
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const ReferralReward = require('../models/ReferralReward');
-const mongoose = require('mongoose');
+const CardType = require('../models/CardType');
 
 /**
  * Визначає статус партнера на основі його активності
@@ -11,12 +11,11 @@ const getPartnerStatusInfo = (partner, partnerCards) => {
     const hasPaidCard = partnerCards.some(c => !c.isTrial && (c.status === 'Active' || c.status === 'Cooling'));
     const trialCard = partnerCards.find(c => c.isTrial);
     const idleBalance = parseFloat(partner.balance.walletUsd?.toString() || 0);
-    const totalProfit = parseFloat(partner.balance.totalProfitUsd?.toString() || 0);
 
     if (!partner.isTrialActivated) {
         return {
             status: 'NOT_ACTIVATED', label: 'НЕ АКТИВОВАНО', color: '#FF4141',
-            description: 'Клієнт ще не активував вітальну монету. Допоможіть йому почати.'
+            description: 'Клієнт ще не активував вітальну монету. Допоможіть йому почати.', params: {}
         };
     }
 
@@ -26,7 +25,7 @@ const getPartnerStatusInfo = (partner, partnerCards) => {
         if (daysLeft > 0) {
             return {
                 status: 'WAITING', label: `ПЕРШИЙ ДОХІД ЧЕРЕЗ ${daysLeft}дн`, color: '#FFB700',
-                description: `Клієнт тестує систему. На балансі вже $${totalProfit.toFixed(2)}.`
+                description: `Клієнт тестує систему.`, params: { daysLeft }
             };
         }
     }
@@ -34,7 +33,7 @@ const getPartnerStatusInfo = (partner, partnerCards) => {
     if (partner.isTrialActivated && !hasPaidCard) {
         return {
             status: 'INVEST', label: 'ЧАС ІНВЕСТУВАТИ', color: '#FF7000',
-            description: 'Тестовий період завершено. Час придбати першу реальну NFT.'
+            description: 'Тестовий період завершено. Час придбати першу реальну NFT.', params: {}
         };
     }
 
@@ -42,18 +41,18 @@ const getPartnerStatusInfo = (partner, partnerCards) => {
     if (idleBalance > 10 && !hasActivePaid) {
         return {
             status: 'GROW', label: 'ЧАС ЗРОСТАТИ', color: '#A855F7',
-            description: 'У клієнта є вільні кошти. Запропонуйте йому розширити потужності.'
+            description: 'У клієнта є вільні кошти. Запропонуйте йому розширити потужності.', params: {}
         };
     }
 
     if (hasActivePaid) {
         return {
             status: 'WORKING', label: 'ГРОШІ ПРАЦЮЮТЬ', color: '#22C55E',
-            description: 'Активний інвестор. Все працює в штатному режимі.'
+            description: 'Активний інвестор. Все працює в штатному режимі.', params: {}
         };
     }
 
-    return { status: 'UNKNOWN', label: 'В ПРОЦЕСІ', color: '#94A3B8', description: 'Клієнт вивчає платформу.' };
+    return { status: 'UNKNOWN', label: 'В ПРОЦЕСІ', color: '#94A3B8', description: 'Клієнт вивчає платформу.', params: {} };
 };
 
 exports.getReferralInfo = async (req, res) => {
@@ -70,21 +69,26 @@ exports.getReferralInfo = async (req, res) => {
         const myReferrals = await User.find({ uplineUserId: user._id });
         const referralIds = myReferrals.map(u => u._id);
 
-        const activeCards = await UserCard.find({ userId: { $in: referralIds }, status: 'Active' });
+        // Капитал партнёров = сумма их активных КУПЛЕННЫХ нод (пробные не считаются)
+        const activeCards = await UserCard.find({ userId: { $in: referralIds }, status: 'Active', isTrial: { $ne: true } });
         const totalPartnerCapital = activeCards.reduce((sum, card) => sum + parseFloat(card.purchasePriceUsd.toString() || 0), 0);
-        const totalIdleCapital = myReferrals.reduce((sum, u) => sum + parseFloat(u.balance.walletUsd.toString() || 0), 0);
-        const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds }, isTrial: false });
+        // Инвестор = есть хотя бы одна купленная карта (в любом статусе)
+        const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds }, isTrial: { $ne: true } });
+
+        const types = await CardType.find({ isActive: true }).select('referralAPY').lean();
+        const refApys = types.map(t => t.referralAPY || 0);
 
         res.json({
             isLocked: false,
             referralLink,
             totalEarnedSats: user.balance.referralSats || 0,
-            apr: 15.5,
+            referralApyMin: refApys.length ? Math.min(...refApys) : 0,
+            referralApyMax: refApys.length ? Math.max(...refApys) : 0,
             stats: {
                 totalInvited: myReferrals.length,
+                investorsCount: investorsCount.length,
                 nonInvestorsCount: myReferrals.length - investorsCount.length,
-                totalPartnerCapital,
-                totalIdleCapital
+                totalPartnerCapital: Math.round(totalPartnerCapital * 100) / 100
             }
         });
     } catch (error) {
@@ -135,25 +139,24 @@ exports.getReferralList = async (req, res) => {
             return {
                 id: r._id,
                 username: r.username || 'Anonymous',
-                tgUsername: r.username,
+                // username вида User<tgId> — заглушка, а не настоящий ник: ссылку t.me на неё не даём
+                tgUsername: r.username && !/^User\d+$/.test(r.username) ? r.username : null,
                 registrationDate: r.createdAt,
                 
-                // CRM
+                // CRM (статус — код, фронт переводит; label/description — запасной текст)
+                status: statusInfo.status,
+                statusParams: statusInfo.params || {},
                 statusLabel: statusInfo.label,
                 statusColor: statusInfo.color,
                 statusDescription: statusInfo.description,
 
-                // Фінанси
-                depositedAmount: parseFloat(r.totalDepositedUsd?.toString() || 0).toFixed(2),
-                totalPartnerIncome: parseFloat(r.balance.totalProfitUsd?.toString() || 0).toFixed(2),
-                idleBalance: parseFloat(r.balance.walletUsd?.toString() || 0).toFixed(2),
+                // Фінанси: балансы и депозиты партнёра не раскрываем — только то, что заработал сам реферер
                 myProfitFromHimBTC: (totalEarnedFromHimSats / 100000000).toFixed(8),
+                myProfitFromHimSats: totalEarnedFromHimSats,
+                lastRewardDate: userRewards.length ? userRewards.map(rw => rw.date).sort().slice(-1)[0] : null,
                 
                 // Детальний список монет
                 inventory,
-
-                // Повідомлення (без кнопки на фронті, але дані є)
-                messageTemplate: `Привіт! Бачу, ти вже заробив $${parseFloat(r.balance.totalProfitUsd?.toString() || 0).toFixed(2)} на тесті. Пора активувати реальну NFT!`,
 
                 // Реальний графік (сортований по даті)
                 chartData: chartData.sort((a,b) => a.date.localeCompare(b.date)).slice(-14)
@@ -169,16 +172,19 @@ exports.getReferralList = async (req, res) => {
 
 exports.claimRewards = async (req, res) => {
     try {
-        const user = await User.findById(req.user._id);
-        const amountToClaim = user.balance.referralSats || 0;
+        const user = await User.findById(req.user._id).lean();
+        const amountToClaim = user?.balance?.referralSats || 0;
 
         if (amountToClaim <= 0) {
-            return res.status(400).json({ success: false, message: "Немає нагород для збору." });
+            return res.status(400).json({ success: false, code: 'NOTHING_TO_CLAIM', message: 'Nothing to claim' });
         }
 
-        user.balance.walletSats = (user.balance.walletSats || 0) + amountToClaim;
-        user.balance.referralSats = 0;
-        await user.save();
+        // Условное обновление: если параллельный claim уже забрал сумму — ничего не произойдёт
+        const r = await User.updateOne(
+            { _id: req.user._id, 'balance.referralSats': amountToClaim },
+            { $inc: { 'balance.walletSats': amountToClaim, 'balance.referralSats': -amountToClaim } }
+        );
+        if (r.modifiedCount !== 1) return res.status(409).json({ success: false, code: 'CONFLICT' });
 
         res.json({ success: true, claimedAmount: amountToClaim });
     } catch (error) {

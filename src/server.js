@@ -52,9 +52,13 @@ app.use('/api/v1/analytics', analyticsRoutes);
 app.get('/', (req, res) => res.send('Tyrex API is running...'));
 
 // Запуск фоновых задач
-startCronJobs();
+if (process.env.DISABLE_CRON !== 'true') {
+    startCronJobs();
+    startReferralJob();
+} else {
+    console.log('⏸️  Cron jobs disabled (DISABLE_CRON=true)');
+}
 priceService.start();
-startReferralJob();
 
 // Трансляция цены из PriceService в Socket.io
 priceService.on('priceUpdate', (data) => {

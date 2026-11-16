@@ -2,25 +2,37 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { verifyTelegramWebAppData } = require('../utils/telegramAuth');
 const { generateReferralCode } = require('../utils/referralCodeGenerator');
-const { updateUserStatus } = require('../utils/userStatusHelper'); 
+const { updateUserStatus } = require('../utils/userStatusHelper');
+
+const getAdminIds = () => (process.env.ADMIN_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 
 exports.login = async (req, res) => {
   try {
     const { initData } = req.body;
     if (!initData) return res.status(400).json({ message: 'No initData' });
 
-    // 1. Проверяем подпись
-    const isValid = verifyTelegramWebAppData(initData);
-    if (!isValid) return res.status(401).json({ message: 'Invalid data' });
+    // 1. Проверяем подпись и свежесть
+    if (!verifyTelegramWebAppData(initData)) {
+        return res.status(401).json({ message: 'Invalid data' });
+    }
 
     // 2. Парсим данные
     const urlParams = new URLSearchParams(initData);
-    const userString = urlParams.get('user');
-    const startParam = urlParams.get('start_param'); 
-    
-    const telegramUser = JSON.parse(userString);
-    const adminIds = (process.env.ADMIN_IDS || '').split(',');
-    const role = adminIds.includes(String(telegramUser.id)) ? 'ADMIN' : 'USER';
+    const startParam = urlParams.get('start_param');
+
+    let telegramUser;
+    try {
+        telegramUser = JSON.parse(urlParams.get('user'));
+    } catch {
+        return res.status(400).json({ message: 'Invalid user payload' });
+    }
+    if (!telegramUser?.id) return res.status(400).json({ message: 'Invalid user payload' });
+
+    // Роль вычисляется при каждом входе: изменения ADMIN_IDS применяются и к старым пользователям
+    const role = getAdminIds().includes(String(telegramUser.id)) ? 'ADMIN' : 'USER';
 
     // 3. Ищем пользователя
     let user = await User.findOne({ tgId: telegramUser.id });
@@ -29,7 +41,6 @@ exports.login = async (req, res) => {
     if (!user) {
         let uplineId = null;
 
-        // Ищем пригласившего
         if (startParam) {
             const inviter = await User.findOne({ referralCode: startParam });
             if (inviter && inviter.tgId !== telegramUser.id) {
@@ -37,51 +48,52 @@ exports.login = async (req, res) => {
             }
         }
 
-        // Генерируем код
         let newCode = generateReferralCode();
         while (await User.findOne({ referralCode: newCode })) {
             newCode = generateReferralCode();
         }
 
-        // Создаем объект (но пока не сохраняем в БД)
+        // Стартовый бонус настраивается через env (по умолчанию 0)
+        const signupBonus = Number(process.env.SIGNUP_BONUS_USD) || 0;
+
         const newUser = new User({
             tgId: telegramUser.id,
             username: telegramUser.username || `User${telegramUser.id}`,
             role,
             referralCode: newCode,
             uplineUserId: uplineId,
-            balance: { walletUsd: 100000 }, // Бонус
+            balance: { walletUsd: signupBonus.toFixed(2) },
             accountStatus: 'NEWBIE'
         });
 
-        // --- ВАЖНЫЙ БЛОК: ОБРАБОТКА ДУБЛИКАТОВ ---
         try {
             await newUser.save();
-            user = newUser; // Успешно создали
+            user = newUser;
         } catch (error) {
-            // Если ошибка 11000 (Duplicate Key), значит параллельный запрос успел создать юзера раньше нас
+            // 11000 = параллельный запрос уже создал пользователя
             if (error.code === 11000) {
-                console.log(`⚠️ Race condition handled: User ${telegramUser.id} already exists.`);
                 user = await User.findOne({ tgId: telegramUser.id });
             } else {
-                // Если это другая ошибка — падаем
                 throw error;
             }
         }
-    } 
-    // --- ЕСЛИ ПОЛЬЗОВАТЕЛЬ УЖЕ БЫЛ ---
-    else {
-        user.username = telegramUser.username || user.username;
-        if (!user.referralCode) {
-             user.referralCode = generateReferralCode();
-             await user.save();
-        }
-        // Аплайна не меняем для старых юзеров
     }
 
-    // Если user все равно null (крайне маловероятно), кидаем ошибку
     if (!user) {
         return res.status(500).json({ message: 'User creation failed due to concurrency' });
+    }
+
+    if (user.isBanned) {
+        return res.status(403).json({ message: 'Account is banned', code: 'BANNED' });
+    }
+
+    // --- Обновляем данные существующего пользователя ---
+    const updates = {};
+    if (telegramUser.username && telegramUser.username !== user.username) updates.username = telegramUser.username;
+    if (user.role !== role) updates.role = role;
+    if (!user.referralCode) updates.referralCode = generateReferralCode();
+    if (Object.keys(updates).length) {
+        user = await User.findByIdAndUpdate(user._id, { $set: updates }, { new: true });
     }
 
     await updateUserStatus(user._id);

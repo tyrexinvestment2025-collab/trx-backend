@@ -13,6 +13,8 @@ const userCardSchema = new mongoose.Schema({
   purchasePriceUsd: { type: mongoose.Schema.Types.Decimal128, required: true },
   currentProfitUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
   currentProfitSats: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
+  // Прибыль, зафиксированная при остановке (выплачивается вместе с телом после охлаждения)
+  coolingPayoutUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
   
   isTrial: { type: Boolean, default: false }, // Если true — это подарочная монета
 

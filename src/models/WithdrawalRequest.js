@@ -5,7 +5,8 @@ const withdrawalRequestSchema = new mongoose.Schema({
   amountUsd: { type: mongoose.Schema.Types.Decimal128, required: true }, 
   status: { type: String, enum: ['PENDING', 'PROCESSED', 'REJECTED'], default: 'PENDING' },
   walletAddress: { type: String, required: true },
-  processedDate: { type: Date }
+  processedDate: { type: Date },
+  adminComment: { type: String }
 }, {
   timestamps: true
 });

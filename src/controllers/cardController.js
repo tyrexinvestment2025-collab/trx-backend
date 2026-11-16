@@ -2,19 +2,17 @@ const CardType = require('../models/CardType');
 const UserCard = require('../models/UserCard');
 const CardHistory = require('../models/CardHistory');
 const User = require('../models/User');
-const ExchangeOrder = require('../models/ExchangeOrder'); // Импорт новой модели
-const googleSheet = require('../services/googleSheetService'); // Добавлено
-const Notification = require('../models/Notification'); // Імпортуємо модель сповіщень
-
-// Импортируем Singleton сервис цены
-const priceService = require('../services/priceService2'); 
+const ExchangeOrder = require('../models/ExchangeOrder');
+const Notification = require('../models/Notification');
+const googleSheet = require('../services/googleSheetService');
+const priceService = require('../services/priceService2');
+const binanceService = require('../services/binanceService');
 const { updateUserStatus } = require('../utils/userStatusHelper');
-const binanceService = require('../services/binanceService'); // НОВОЕ
+const { toNum, round2, dec, isObjectId } = require('../utils/money');
 
-/**
- * Утилита для безопасной работы с числами
- */
-const parseDecimal = (v) => v ? parseFloat(v.toString()) : 0;
+const SATS_IN_BTC = 100000000;
+const COOLING_DAYS = Number(process.env.COOLING_DAYS) || 30;
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 30;
 
 /**
  * Хелпер для формирования базового URL (поддержка HTTPS на Render)
@@ -23,18 +21,58 @@ const getBaseUrl = (req) => {
     if (process.env.NODE_ENV === 'production' && req) {
         return `https://${req.get('host')}`;
     }
-    return process.env.API_URL || 'http://localhost:5000'; 
+    return process.env.API_URL || 'http://localhost:5000';
+};
+
+/**
+ * Записывает сделку с биржей в БД (история в админке) и в Google Sheets.
+ * Ошибки логирования не должны ломать ответ пользователю.
+ */
+const logExchange = async ({ user, cardId, type, btcAmount, appUsd, exchangeResult, sheetType }) => {
+    const ok = !!exchangeResult?.success;
+    const usdt = ok ? parseFloat(exchangeResult.spentUsdt ?? exchangeResult.receivedUsdt) || 0 : 0;
+    const rate = ok ? (parseFloat(exchangeResult.executedPrice) || (btcAmount ? usdt / btcAmount : 0)) : 0;
+    const profit = ok ? (type === 'BUY' ? appUsd - usdt : usdt - appUsd) : 0;
+
+    try {
+        await ExchangeOrder.create({
+            userId: user._id,
+            cardId,
+            type,
+            btcAmount,
+            appUsdAmount: appUsd,
+            binanceUsdtAmount: usdt,
+            executedPrice: rate,
+            binanceOrderId: exchangeResult?.orderId ? String(exchangeResult.orderId) : undefined,
+            status: ok ? 'SUCCESS' : 'FAILED',
+            errorLog: ok ? undefined : exchangeResult?.error,
+            profitDelta: profit
+        });
+    } catch (e) {
+        console.error('[ExchangeOrder log error]:', e.message);
+    }
+
+    googleSheet.appendOrder({
+        username: user.username || user.tgId,
+        type: sheetType || type,
+        btcAmount,
+        appUsd,
+        binanceUsdt: usdt,
+        rate,
+        status: ok ? 'SUCCESS' : 'FAILED',
+        profit,
+        orderId: exchangeResult?.orderId || 'N/A'
+    });
+
+    return { rate };
 };
 
 /**
  * ПОЛУЧИТЬ ТИПЫ КАРТ
- * Пересчитывает стоимость в USDT на лету по актуальному курсу
  */
 exports.getCardTypes = async (req, res) => {
     try {
         const btcPrice = priceService.getBitcoinPrice();
-        
-        // Защита: если цена не получена от биржи, не даем пользователю видеть витрину
         if (btcPrice === null) {
             return res.status(503).json({ message: 'Market data is syncing. Please wait...' });
         }
@@ -42,18 +80,15 @@ exports.getCardTypes = async (req, res) => {
         const types = await CardType.find({ isActive: true }).lean();
         const baseUrl = getBaseUrl(req);
 
-        const response = types.map(t => ({
+        res.json(types.map(t => ({
             ...t,
             id: t._id,
             imageUrl: `${baseUrl}${t.imagePath}`,
-            // Расчет: (сатоши / 100 млн) * цена BTC
-            priceUSDT: Math.round((parseDecimal(t.nominalSats) / 100000000) * btcPrice)
-        }));
-
-        res.json(response);
-    } catch (e) { 
+            priceUSDT: Math.round((toNum(t.nominalSats) / SATS_IN_BTC) * btcPrice)
+        })));
+    } catch (e) {
         console.error(`[getCardTypes Error]: ${e.message}`);
-        res.status(500).json({ message: 'Server Error' }); 
+        res.status(500).json({ message: 'Server Error' });
     }
 };
 
@@ -63,100 +98,125 @@ exports.getCardTypes = async (req, res) => {
 exports.getCollectionItems = async (req, res) => {
     try {
         const { id } = req.params;
-        const btcPrice = priceService.getBitcoinPrice();
+        if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid collection id' });
 
-        if (btcPrice === null) {
-            return res.status(503).json({ message: 'Price feed unavailable' });
-        }
+        const btcPrice = priceService.getBitcoinPrice();
+        if (btcPrice === null) return res.status(503).json({ message: 'Price feed unavailable' });
 
         const cardType = await CardType.findById(id).lean();
         if (!cardType) return res.status(404).json({ message: 'Collection not found' });
 
         const baseUrl = getBaseUrl(req);
-        const priceUSDT = Math.round((parseDecimal(cardType.nominalSats) / 100000000) * btcPrice);
+        const nominalSats = toNum(cardType.nominalSats);
+        const priceUSDT = Math.round((nominalSats / SATS_IN_BTC) * btcPrice);
 
         const sold = await UserCard.find({ cardTypeId: id }).select('serialNumber').lean();
         const soldSet = new Set(sold.map(s => s.serialNumber));
 
-const items = [];
-const nominalSats = parseDecimal(cardType.nominalSats); // Берем из типа карты
+        const items = [];
+        for (let i = 1; i <= cardType.maxSupply; i++) {
+            items.push({
+                serialNumber: i,
+                isSold: soldSet.has(i),
+                priceUSDT,
+                nominalSats,
+                imageUrl: `${baseUrl}${cardType.imagePath}`
+            });
+        }
 
-for (let i = 1; i <= cardType.maxSupply; i++) {
-    items.push({
-        serialNumber: i,
-        isSold: soldSet.has(i),
-        priceUSDT,
-        nominalSats, // ОБЯЗАТЕЛЬНО ДОБАВЛЯЕМ СЮДА
-        imageUrl: `${baseUrl}${cardType.imagePath}`
-    });
-}
-
-        res.json({ 
-            collection: { ...cardType, id: cardType._id, priceUSDT }, 
-            items 
-        });
-    } catch (e) { 
+        res.json({ collection: { ...cardType, id: cardType._id, priceUSDT }, items });
+    } catch (e) {
         console.error(`[getCollectionItems Error]: ${e.message}`);
-        res.status(500).json({ message: 'Server Error' }); 
+        res.status(500).json({ message: 'Server Error' });
     }
 };
 
 /**
- * ПОКУПКА КАРТЫ (С логированием статистики)
+ * ПОКУПКА КАРТЫ
+ * Порядок: резерв тиража → атомарное списание (с проверкой баланса) → создание карты.
+ * При любой ошибке после списания — компенсация (возврат денег и тиража).
  */
 exports.buyCard = async (req, res) => {
-    const { cardTypeId, serialNumber } = req.body;
+    const { cardTypeId } = req.body;
+    const serialNumber = Number(req.body.serialNumber);
+
+    if (!isObjectId(cardTypeId)) return res.status(400).json({ message: 'Invalid card type', code: 'INVALID_TYPE' });
+    if (!Number.isInteger(serialNumber) || serialNumber < 1) {
+        return res.status(400).json({ message: 'Invalid serial number', code: 'INVALID_SERIAL' });
+    }
+
+    const btcPrice = priceService.getBitcoinPrice();
+    if (btcPrice === null) return res.status(503).json({ message: 'Price unavailable', code: 'PRICE_UNAVAILABLE' });
+
+    let stockReserved = false;
+    let debited = 0;
+
     try {
-        const btcPrice = priceService.getBitcoinPrice();
-        if (btcPrice === null) return res.status(503).json({ message: 'Price unavailable' });
-
-        const user = await User.findById(req.user._id);
         const type = await CardType.findById(cardTypeId);
-        
-        const nominalSats = parseDecimal(type.nominalSats);
-        const btcToBuy = nominalSats / 100000000;
-        const costUSD = btcToBuy * btcPrice;
+        if (!type || !type.isActive) return res.status(404).json({ message: 'Card type not found', code: 'INVALID_TYPE' });
+        if (serialNumber > type.maxSupply) return res.status(400).json({ message: 'Invalid serial number', code: 'INVALID_SERIAL' });
+        if (await UserCard.exists({ cardTypeId, serialNumber })) {
+            return res.status(409).json({ message: 'This serial number is already sold', code: 'SERIAL_TAKEN' });
+        }
 
-        if (parseDecimal(user.balance.walletUsd) < costUSD) return res.status(400).json({ message: 'No money' });
+        const nominalSats = toNum(type.nominalSats);
+        const btcToBuy = nominalSats / SATS_IN_BTC;
+        const costUSD = round2(btcToBuy * btcPrice);
 
-        // 1. Внутренние операции БД
-        user.balance.walletUsd = (parseDecimal(user.balance.walletUsd) - costUSD).toFixed(2);
-        type.available -= 1;
-        await user.save();
-        await type.save();
+        // 1. Резервируем единицу тиража
+        const reserved = await CardType.findOneAndUpdate(
+            { _id: cardTypeId, isActive: true, available: { $gt: 0 } },
+            { $inc: { available: -1 } }
+        );
+        if (!reserved) return res.status(409).json({ message: 'Sold out', code: 'SOLD_OUT' });
+        stockReserved = true;
 
-        const baseUrl = getBaseUrl(req);
+        // 2. Атомарное списание: проходит, только если денег хватает
+        const user = await User.findOneAndUpdate(
+            { _id: req.user._id, 'balance.walletUsd': { $gte: dec(costUSD) } },
+            { $inc: { 'balance.walletUsd': dec(-costUSD) } },
+            { new: true }
+        );
+        if (!user) {
+            await CardType.updateOne({ _id: cardTypeId }, { $inc: { available: 1 } });
+            stockReserved = false;
+            return res.status(400).json({ message: 'Insufficient balance', code: 'INSUFFICIENT_BALANCE' });
+        }
+        debited = costUSD;
+
+        // 3. Создаём карту (уникальный индекс защищает номер от двойной продажи)
         const card = await UserCard.create({
-            userId: user._id, cardTypeId, serialNumber,
+            userId: user._id,
+            cardTypeId,
+            serialNumber,
             nominalSats: type.nominalSats,
             purchasePriceUsd: costUSD.toFixed(2),
-            imageUrl: `${baseUrl}${type.imagePath}`,
+            imageUrl: `${getBaseUrl(req)}${type.imagePath}`,
             status: 'Inactive'
         });
 
-        // 2. Исполнение ордера на Binance
-        const exchangeResult = await binanceService.executeMarketBuy(btcToBuy);
+        // С этого момента покупка состоялась — дальше только побочные действия
+        stockReserved = false;
+        debited = 0;
 
-        // 3. ЛАЙВ-ЗАПИСЬ В GOOGLE SHEETS
-        // Вызываем без await, чтобы не заставлять юзера ждать ответа от гугла
-        googleSheet.appendOrder({
-            username: user.username || user.tgId,
-            type: 'BUY',
-            btcAmount: btcToBuy,
-            appUsd: costUSD,
-            binanceUsdt: exchangeResult.success ? parseFloat(exchangeResult.spentUsdt) : 0,
-            rate: exchangeResult.success ? parseFloat(exchangeResult.executedPrice) : 0,
-            status: exchangeResult.success ? 'SUCCESS' : 'FAILED',
-            profit: exchangeResult.success ? (costUSD - parseFloat(exchangeResult.spentUsdt)) : 0,
-            orderId: exchangeResult.orderId
-        });
-
-        // 4. История и логи
         await CardHistory.create({ cardTypeId, serialNumber, userId: user._id, eventType: 'PURCHASE', priceUsd: costUSD.toFixed(2) });
         await updateUserStatus(user._id);
 
         res.status(201).json({ message: 'Success', card });
-    } catch (e) { res.status(500).json({ message: 'Error' }); }
+
+        // 4. Хедж на бирже — после ответа, чтобы пользователь не ждал
+        const exchangeResult = await binanceService.executeMarketBuy(btcToBuy);
+        await logExchange({ user, cardId: card._id, type: 'BUY', btcAmount: btcToBuy, appUsd: costUSD, exchangeResult });
+    } catch (e) {
+        // Компенсация
+        if (debited) await User.updateOne({ _id: req.user._id }, { $inc: { 'balance.walletUsd': dec(debited) } }).catch(() => {});
+        if (stockReserved) await CardType.updateOne({ _id: cardTypeId }, { $inc: { available: 1 } }).catch(() => {});
+
+        if (res.headersSent) return console.error('[buyCard post-response error]:', e.message);
+        if (e.code === 11000) return res.status(409).json({ message: 'This serial number is already sold', code: 'SERIAL_TAKEN' });
+        console.error('[buyCard Error]:', e);
+        res.status(500).json({ message: 'Error', code: 'SERVER_ERROR' });
+    }
 };
 
 /**
@@ -167,131 +227,134 @@ exports.getMyCards = async (req, res) => {
         const baseUrl = getBaseUrl(req);
         const cards = await UserCard.find({ userId: req.user._id }).populate('cardTypeId').lean();
 
-        const processedCards = cards.map(card => {
+        res.json(cards.map(card => {
             let finalImageUrl = card.imageUrl;
             if (!finalImageUrl || !finalImageUrl.startsWith('http')) {
-                if (card.cardTypeId && card.cardTypeId.imagePath) {
-                    finalImageUrl = `${baseUrl}${card.cardTypeId.imagePath}`;
-                }
-            } 
-            else if (finalImageUrl.startsWith('http://') && process.env.NODE_ENV === 'production') {
+                if (card.cardTypeId?.imagePath) finalImageUrl = `${baseUrl}${card.cardTypeId.imagePath}`;
+            } else if (finalImageUrl.startsWith('http://') && process.env.NODE_ENV === 'production') {
                 finalImageUrl = finalImageUrl.replace('http://', 'https://');
             }
-            
             return { ...card, imageUrl: finalImageUrl };
-        });
-
-        res.json(processedCards);
+        }));
     } catch (e) { res.status(500).json({ message: 'Error fetching cards' }); }
 };
 
 /**
- * ЗАПУСК МАЙНИНГА (Стейкинг)
+ * ЗАПУСК МАЙНИНГА
+ * Разрешён только для купленной карты, которая ещё не запускалась (Inactive).
+ * Cooling/Finished — тело карты уже возвращено/возвращается, повторный запуск запрещён.
  */
 exports.startCard = async (req, res) => {
     try {
-        const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
-        if (!card) return res.status(404).json({ message: 'Card not found' });
-        if (card.status === 'Active') return res.status(400).json({ message: 'Already active' });
+        if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid card id' });
 
-        card.status = 'Active';
-        card.lastAccrualDate = Date.now();
-        
-        const user = await User.findById(card.userId); 
-        user.balance.stakingUsd = (parseDecimal(user.balance.stakingUsd) + parseDecimal(card.purchasePriceUsd)).toFixed(2);
-        
-        await Promise.all([card.save(), user.save()]);
-        
+        const card = await UserCard.findOneAndUpdate(
+            { _id: req.params.id, userId: req.user._id, status: 'Inactive', isTrial: { $ne: true } },
+            { $set: { status: 'Active', lastAccrualDate: new Date() } },
+            { new: true }
+        );
+        if (!card) return res.status(400).json({ message: 'Card cannot be started', code: 'INVALID_STATUS' });
+
+        await User.updateOne({ _id: req.user._id }, { $inc: { 'balance.stakingUsd': dec(toNum(card.purchasePriceUsd)) } });
+        await updateUserStatus(req.user._id);
+
         res.json({ message: 'Mining started', card });
     } catch (e) { res.status(500).json({ message: 'Error starting card' }); }
 };
 
 /**
  * ОСТАНОВКА МАЙНИНГА (Охлаждение)
+ * Тело и прибыль замораживаются в pending и выплачиваются cron-ом по окончании охлаждения.
  */
 exports.stopCard = async (req, res) => {
     try {
-        const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
-        if (!card || card.status !== 'Active') return res.status(400).json({ message: 'Card is not active' });
+        if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid card id' });
 
-        const profit = parseDecimal(card.currentProfitUsd);
-        const purchasePrice = parseDecimal(card.purchasePriceUsd);
+        // Читаем прибыль и атомарно переводим статус (защита от двойного нажатия)
+        const current = await UserCard.findOne({ _id: req.params.id, userId: req.user._id, status: 'Active', isTrial: { $ne: true } });
+        if (!current) return res.status(400).json({ message: 'Card is not active', code: 'INVALID_STATUS' });
 
-        card.status = 'Cooling';
-        card.unlockAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); 
-        card.currentProfitUsd = 0; 
-        
-        const user = await User.findById(card.userId); 
-        // Возвращаем тело карты и накопленный профит в ожидание
-        user.balance.pendingWithdrawalUsd = (parseDecimal(user.balance.pendingWithdrawalUsd) + purchasePrice + profit).toFixed(2);
-        user.balance.stakingUsd = Math.max(0, parseDecimal(user.balance.stakingUsd) - purchasePrice).toFixed(2);
-        
-        await Promise.all([card.save(), user.save()]);
-        res.json({ message: 'Mining stopped. Card is cooling down.' });
+        const profit = round2(toNum(current.currentProfitUsd));
+        const purchasePrice = round2(toNum(current.purchasePriceUsd));
+
+        const card = await UserCard.findOneAndUpdate(
+            { _id: current._id, status: 'Active' },
+            { $set: {
+                status: 'Cooling',
+                unlockAt: new Date(Date.now() + COOLING_DAYS * 24 * 60 * 60 * 1000),
+                currentProfitUsd: dec(0),
+                coolingPayoutUsd: dec(profit)
+            } },
+            { new: true }
+        );
+        if (!card) return res.status(409).json({ message: 'Card state changed, retry', code: 'CONFLICT' });
+
+        await User.updateOne({ _id: req.user._id }, {
+            $inc: {
+                'balance.pendingWithdrawalUsd': dec(purchasePrice + profit),
+                'balance.stakingUsd': dec(-purchasePrice)
+            }
+        });
+
+        await CardHistory.create({
+            cardTypeId: card.cardTypeId, serialNumber: card.serialNumber, userId: req.user._id,
+            eventType: 'MINING_SESSION', profitUsd: profit.toFixed(2), priceUsd: purchasePrice.toFixed(2),
+            startedAt: current.updatedAt, endedAt: new Date()
+        }).catch(() => {});
+        await updateUserStatus(req.user._id);
+
+        res.json({ message: 'Mining stopped. Card is cooling down.', unlockAt: card.unlockAt, payoutUsd: round2(purchasePrice + profit) });
     } catch (e) { res.status(500).json({ message: 'Error stopping card' }); }
 };
 
 /**
  * ПРОДАЖА КАРТЫ ОБРАТНО СЕРВИСУ (Refund)
- */
-/**
- * ПРОДАЖА КАРТЫ ОБРАТНО СЕРВИСУ (Refund)
- * С продажей BTC на бирже и записью в Google Таблицу
+ * Только для купленной, ни разу не запущенной карты (Inactive).
+ * Finished-карты уже вернули тело через охлаждение, пробные карты не покупались — их продавать нельзя.
  */
 exports.sellCardBack = async (req, res) => {
     try {
-        const card = await UserCard.findOne({ _id: req.params.id, userId: req.user._id });
-        
-        // Разрешаем продажу, если карта Inactive или Finished
-        if (!card || (card.status !== 'Inactive' && card.status !== 'Finished')) {
-            return res.status(400).json({ message: 'Майнінг має бути зупинений перед продажем' });
+        if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid card id' });
+
+        // Атомарно забираем карту — второй параллельный запрос уже ничего не найдёт
+        const card = await UserCard.findOneAndDelete({
+            _id: req.params.id, userId: req.user._id, status: 'Inactive', isTrial: { $ne: true }
+        });
+        if (!card) {
+            return res.status(400).json({ message: 'Card cannot be sold in its current state', code: 'INVALID_STATUS' });
         }
 
-        const user = await User.findById(card.userId); 
-        const nominalBTC = parseDecimal(card.nominalSats) / 100000000;
-        const refundAmount = parseDecimal(card.purchasePriceUsd); 
+        const nominalBTC = toNum(card.nominalSats) / SATS_IN_BTC;
+        const refundAmount = round2(toNum(card.purchasePriceUsd));
 
-        // 1. Продажа на Binance
+        const user = await User.findOneAndUpdate(
+            { _id: req.user._id },
+            { $inc: { 'balance.walletUsd': dec(refundAmount) } },
+            { new: true }
+        );
+        await CardType.updateOne({ _id: card.cardTypeId }, { $inc: { available: 1 } });
+        await CardHistory.create({
+            cardTypeId: card.cardTypeId, serialNumber: card.serialNumber, userId: req.user._id,
+            eventType: 'SOLD_BACK', priceUsd: refundAmount.toFixed(2)
+        }).catch(() => {});
+        await updateUserStatus(req.user._id);
+
         const exchangeResult = await binanceService.executeMarketSell(nominalBTC);
-        
-        // Получаем реальный курс с биржи или рассчитываем его
-        const sellRate = exchangeResult.success 
-            ? parseFloat(exchangeResult.executedPrice || (parseFloat(exchangeResult.receivedUsdt) / nominalBTC))
-            : priceService.getBitcoinPrice();
-
-        // 2. Начисляем деньги пользователю
-        user.balance.walletUsd = (parseDecimal(user.balance.walletUsd) + refundAmount).toFixed(2);
-        
-        // 3. Сохраняем и удаляем карту
-        await user.save();
-        await CardType.findByIdAndUpdate(card.cardTypeId, { $inc: { available: 1 } });
-        await UserCard.findByIdAndDelete(card._id);
-
-        // 4. Лог в Google Sheets
-        googleSheet.appendOrder({
-            username: user.username || user.tgId,
-            type: 'SELL (Refund)',
-            btcAmount: nominalBTC,
-            appUsd: refundAmount,
-            binanceUsdt: exchangeResult.success ? parseFloat(exchangeResult.receivedUsdt) : 0,
-            rate: sellRate,
-            status: exchangeResult.success ? 'SUCCESS' : 'FAILED',
-            profit: exchangeResult.success ? (parseFloat(exchangeResult.receivedUsdt) - refundAmount) : 0,
-            orderId: exchangeResult.orderId || 'N/A'
+        const { rate } = await logExchange({
+            user, cardId: card._id, type: 'SELL', btcAmount: nominalBTC, appUsd: refundAmount,
+            exchangeResult, sheetType: 'SELL (Refund)'
         });
 
-        // Возвращаем данные для фронтенда
-        res.json({ 
+        res.json({
             success: true,
-            message: 'Карту успішно продано', 
-            amount: refundAmount.toFixed(2), 
-            rate: sellRate.toLocaleString(),
-            isExchangeSuccess: exchangeResult.success 
+            message: 'Card sold',
+            amount: refundAmount.toFixed(2),
+            rate: rate || priceService.getBitcoinPrice(),
+            isExchangeSuccess: !!exchangeResult.success
         });
-
-    } catch (e) { 
+    } catch (e) {
         console.error('❌ [sellCardBack Error]:', e.message);
-        res.status(500).json({ message: 'Помилка під час продажу' }); 
+        res.status(500).json({ message: 'Error selling card' });
     }
 };
 
@@ -300,87 +363,101 @@ exports.sellCardBack = async (req, res) => {
  */
 exports.getCardHistoryBySerial = async (req, res) => {
     try {
-        const history = await CardHistory.find({ 
-            cardTypeId: req.params.typeId, 
-            serialNumber: req.params.serial 
+        if (!isObjectId(req.params.typeId)) return res.status(400).json({ message: 'Invalid id' });
+        const history = await CardHistory.find({
+            cardTypeId: req.params.typeId,
+            serialNumber: Number(req.params.serial)
         })
         .populate('userId', 'username')
         .sort({ createdAt: -1 })
         .lean();
-        
+
         res.json(history);
     } catch (e) { res.status(500).json({ message: 'Error fetching history' }); }
 };
 
+/**
+ * ПОДАРОЧНАЯ КАРТА
+ * Подписка на канал проверяется на сервере, а не по флагу клиента.
+ */
 exports.activateTrialCard = async (req, res) => {
     try {
+        const { isChannelMember } = require('./userController');
+        const member = await isChannelMember(req.user.tgId);
+        if (member === false) return res.status(403).json({ message: 'Subscribe to the channel first', code: 'NOT_SUBSCRIBED' });
+        if (member === null) return res.status(503).json({ message: 'Unable to verify subscription', code: 'SUBSCRIPTION_CHECK_FAILED' });
+
         const user = await User.findOneAndUpdate(
             { _id: req.user._id, isTrialActivated: false },
             { $set: { isTrialActivated: true, trialActivatedAt: new Date() } },
             { new: true }
         );
+        if (!user) return res.status(400).json({ message: 'Gift already claimed', code: 'ALREADY_CLAIMED' });
 
-        if (!user) {
-            return res.status(400).json({ message: "Ви вже отримали свій подарунок!" });
-        }
+        const rollback = () => User.updateOne({ _id: req.user._id }, { $set: { isTrialActivated: false }, $unset: { trialActivatedAt: 1 } });
 
         const miniType = await CardType.findOne({ name: { $regex: /^Tyrex Mini$/i } });
         if (!miniType) {
-            await User.updateOne({ _id: req.user._id }, { $set: { isTrialActivated: false } });
-            return res.status(404).json({ message: "Серія 'Tyrex Mini' не знайдена" });
+            await rollback();
+            return res.status(404).json({ message: "Series 'Tyrex Mini' not found", code: 'INVALID_TYPE' });
         }
 
-        const takenCards = await UserCard.find({ cardTypeId: miniType._id }).distinct('serialNumber');
-        const allPossibleNumbers = Array.from({ length: miniType.maxSupply }, (_, i) => i + 1);
-        const availableNumbers = allPossibleNumbers.filter(num => !takenCards.includes(num));
-
-        if (availableNumbers.length === 0) {
-            await User.updateOne({ _id: req.user._id }, { $set: { isTrialActivated: false } });
-            return res.status(400).json({ message: "Всі монети вже розібрані!" });
-        }
-
-        const randomSerialNumber = availableNumbers[Math.floor(Math.random() * availableNumbers.length)];
-        const expiryDate = new Date();
-        expiryDate.setDate(expiryDate.getDate() + 30);
-
-        // --- ВИПРАВЛЕННЯ ТУТ: Додаємо базовий URL ---
-        const baseUrl = getBaseUrl(req); 
+        const baseUrl = getBaseUrl(req);
         const finalImageUrl = `${baseUrl}${miniType.imagePath}`;
+        const expiryDate = new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
 
-        const trialCard = new UserCard({
-            userId: user._id,
-            cardTypeId: miniType._id,
-            serialNumber: randomSerialNumber,
-            status: 'Active',
-            nominalSats: miniType.nominalSats,
-            purchasePriceUsd: 0,
-            isTrial: true,
-            imageUrl: finalImageUrl, // Зберігаємо повний шлях
-            unlockAt: expiryDate,
-            lastAccrualDate: new Date()
-        });
+        // Номер может перехватить параллельная покупка — пробуем несколько раз
+        let trialCard = null;
+        for (let attempt = 0; attempt < 5 && !trialCard; attempt++) {
+            const takenCards = new Set(await UserCard.find({ cardTypeId: miniType._id }).distinct('serialNumber'));
+            const free = [];
+            for (let i = 1; i <= miniType.maxSupply; i++) if (!takenCards.has(i)) free.push(i);
+            if (free.length === 0) break;
 
-        await trialCard.save();
+            const serialNumber = free[Math.floor(Math.random() * free.length)];
+            try {
+                trialCard = await UserCard.create({
+                    userId: user._id,
+                    cardTypeId: miniType._id,
+                    serialNumber,
+                    status: 'Active',
+                    nominalSats: miniType.nominalSats,
+                    purchasePriceUsd: 0,
+                    isTrial: true,
+                    imageUrl: finalImageUrl,
+                    unlockAt: expiryDate,
+                    lastAccrualDate: new Date()
+                });
+            } catch (e) {
+                if (e.code !== 11000) throw e;
+            }
+        }
+
+        if (!trialCard) {
+            await rollback();
+            return res.status(409).json({ message: 'All coins are taken', code: 'SOLD_OUT' });
+        }
+
         await CardType.updateOne({ _id: miniType._id }, { $inc: { available: -1 } });
+        await updateUserStatus(user._id);
 
         await Notification.create({
             userId: user._id,
-            title: "🌟 ТВОЯ УДАЧА ПОСМІХНУЛАСЯ!",
-            message: `Ви витягнули унікальну монету Tyrex Mini!\n\n💎 ВАШ НОМЕР: #${randomSerialNumber}`,
-            type: 'INFO'
+            title: '🌟 Tyrex Mini',
+            message: `#${trialCard.serialNumber}`,
+            type: 'INFO',
+            key: 'trial_activated',
+            params: { serial: trialCard.serialNumber }
         });
 
-        res.json({ 
-            success: true, 
-            message: `Вітаємо! Ваш щасливий номер #${randomSerialNumber}`,
-            card: {
-                ...trialCard.toObject(),
-                imageUrl: finalImageUrl // Віддаємо повний шлях на фронт
-            }
+        res.json({
+            success: true,
+            serialNumber: trialCard.serialNumber,
+            message: `#${trialCard.serialNumber}`,
+            card: { ...trialCard.toObject(), imageUrl: finalImageUrl }
         });
-
     } catch (error) {
         console.error('[Trial Error]:', error);
-        res.status(500).json({ message: "Помилка при виборі карти" });
+        res.status(500).json({ message: 'Error activating gift', code: 'SERVER_ERROR' });
     }
 };

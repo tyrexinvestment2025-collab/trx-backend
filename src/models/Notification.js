@@ -6,6 +6,9 @@ const notificationSchema = new mongoose.Schema({
   message: { type: String, required: true },
   type: { type: String, enum: ['INFO', 'DEPOSIT', 'WITHDRAWAL', 'SYSTEM'], default: 'INFO' },
   isRead: { type: Boolean, default: false },
+  // Ключ локализации + параметры: фронт переводит сам, title/message — запасной текст
+  key: { type: String },
+  params: { type: mongoose.Schema.Types.Mixed },
 }, {
   timestamps: true
 });

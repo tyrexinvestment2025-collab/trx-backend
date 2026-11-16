@@ -1,13 +1,13 @@
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const { getFearAndGreedIndex } = require('../services/marketService');
-const priceService = require('../services/priceService'); // Твой сервис цен
+const priceService = require('../services/priceService2');
 const COMPARISON_DATA = require('../config/benchmarks');
 
 exports.getAnalyticsDashboard = async (req, res) => {
     try {
         // Получаем текущую цену BTC из твоего сервиса
-        const btcPrice = priceService.getBitcoinPrice() || 60000; 
+        const btcPrice = priceService.getBitcoinPrice();
 
         // Загружаем данные
         const [user, fng, userCards] = await Promise.all([
@@ -35,7 +35,7 @@ exports.getAnalyticsDashboard = async (req, res) => {
         const tyrexScore = {
             yield: 90, 
             safety: 90, 
-            liquidity: 100,
+            liquidity: 40, // 30 дней охлаждения при выходе из майнинга
             passive: 90,
             entry: 100,
             growth: 80 
@@ -52,12 +52,10 @@ exports.getAnalyticsDashboard = async (req, res) => {
                 
                 // Данные для бенчмарков (старая логика)
                 benchmarks: COMPARISON_DATA,
-                userScore: tyrexScore
+                userScore: tyrexScore,
+                activeNodes: userCards.length
             },
-            // Данные для квиза (оставляем как было)
-            quiz: {
-                available: (user.lastDailyQuizAt ? new Date(user.lastDailyQuizAt).setHours(0,0,0,0) : 0) < new Date().setHours(0,0,0,0)
-            }
+            btcPrice
         });
 
     } catch (error) {

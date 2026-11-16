@@ -9,4 +9,7 @@ const referralRewardSchema = new mongoose.Schema({
   date: { type: String, required: true }, // Формат "YYYY-MM-DD" для легкой группировки
 }, { timestamps: true });
 
+// Идемпотентность: одна выплата за карту за день (защита от повторного запуска cron / нескольких инстансов)
+referralRewardSchema.index({ sourceCardId: 1, date: 1 }, { unique: true, partialFilterExpression: { sourceCardId: { $exists: true } } });
+
 module.exports = mongoose.model('ReferralReward', referralRewardSchema);

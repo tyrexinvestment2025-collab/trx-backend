@@ -7,13 +7,8 @@ const { updateUserStatus } = require('../utils/userStatusHelper');
 const Notification = require('../models/Notification'); // ИМПОРТ НОВОЙ МОДЕЛИ
 const ExchangeOrder = require('../models/ExchangeOrder');
 const ExcelJS = require('exceljs');
-// Вспомогательная функция для безопасного парсинга
-const parseDecimal = (value) => {
-    if (value && value.toString) {
-        return parseFloat(value.toString());
-    }
-    return 0;
-};
+const { toNum, round2, dec, isObjectId } = require('../utils/money');
+const parseDecimal = toNum;
 
 // Получить заявки на пополнение
 exports.getPendingDeposits = async (req, res) => {
@@ -83,98 +78,71 @@ exports.getPendingWithdrawals = async (req, res) => {
 
 
 // Подтвердить пополнение + отправить уведомление
+// Статус меняется атомарно: повторный клик / параллельный запрос не зачислит деньги дважды
 exports.confirmDeposit = async (req, res) => {
   try {
-    const deposit = await DepositRequest.findById(req.params.id);
-    if (!deposit || deposit.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending' });
+    if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid id' });
+    const deposit = await DepositRequest.findOneAndUpdate(
+      { _id: req.params.id, status: 'PENDING' },
+      { $set: { status: 'CONFIRMED' } },
+      { new: true }
+    );
+    if (!deposit) return res.status(400).json({ message: 'Request is not pending' });
 
-    const user = await User.findById(deposit.userId);
+    const amount = round2(toNum(deposit.amountUsd));
+    const user = await User.findOneAndUpdate(
+      { _id: deposit.userId },
+      { $inc: { 'balance.walletUsd': dec(amount), totalDepositedUsd: dec(amount) } },
+      { new: true }
+    );
     if (!user) {
-        deposit.status = 'REJECTED';
-        await deposit.save();
-        return res.status(404).json({ message: 'User not found' });
+      await DepositRequest.updateOne({ _id: deposit._id }, { $set: { status: 'REJECTED', adminComment: 'User not found' } });
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    const depositAmount = parseDecimal(deposit.amountUsd);
-    user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + depositAmount;
-    await user.save();
-
-    deposit.status = 'CONFIRMED';
-    await deposit.save();
-
-    // СОЗДАЕМ УВЕДОМЛЕНИЕ
     await Notification.create({
         userId: user._id,
         title: 'Deposit Confirmed',
-        message: `Your account has been successfully topped up by $${depositAmount.toFixed(2)}.`,
-        type: 'DEPOSIT'
+        message: `Your account has been topped up by $${amount.toFixed(2)}.`,
+        type: 'DEPOSIT',
+        key: 'deposit_confirmed',
+        params: { amount }
     });
 
     await updateUserStatus(user._id);
     res.json({ message: 'Deposit confirmed and notification sent' });
   } catch (error) {
+    console.error('confirmDeposit error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
 
 exports.processWithdrawal = async (req, res) => {
   try {
-    const withdrawal = await WithdrawalRequest.findById(req.params.id);
-    if (!withdrawal || withdrawal.status !== 'PENDING') return res.status(400).json({ message: 'Request is not pending' });
+    if (!isObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid id' });
+    const withdrawal = await WithdrawalRequest.findOneAndUpdate(
+      { _id: req.params.id, status: 'PENDING' },
+      { $set: { status: 'PROCESSED', processedDate: new Date() } },
+      { new: true }
+    );
+    if (!withdrawal) return res.status(400).json({ message: 'Request is not pending' });
 
-    const user = await User.findById(withdrawal.userId);
-    if (user) {
-      const withdrawalAmount = parseDecimal(withdrawal.amountUsd);
-      let newPending = parseDecimal(user.balance.pendingWithdrawalUsd) - withdrawalAmount;
-      user.balance.pendingWithdrawalUsd = newPending < 0 ? 0 : newPending;
-      await user.save();
+    const amount = round2(toNum(withdrawal.amountUsd));
+    // Деньги уже списаны с кошелька при создании заявки — убираем их из pending
+    await User.updateOne({ _id: withdrawal.userId }, { $inc: { 'balance.pendingWithdrawalUsd': dec(-amount) } });
 
-      // СОЗДАЕМ УВЕДОМЛЕНИЕ
-      await Notification.create({
-          userId: user._id,
-          title: 'Withdrawal Processed',
-          message: `Your withdrawal of $${withdrawalAmount.toFixed(2)} has been processed.`,
-          type: 'WITHDRAWAL'
-      });
-    }
-
-    withdrawal.status = 'PROCESSED';
-    withdrawal.processedDate = Date.now();
-    await withdrawal.save();
+    await Notification.create({
+        userId: withdrawal.userId,
+        title: 'Withdrawal Processed',
+        message: `Your withdrawal of $${amount.toFixed(2)} has been processed.`,
+        type: 'WITHDRAWAL',
+        key: 'withdrawal_processed',
+        params: { amount }
+    });
 
     res.json({ message: 'Withdrawal processed and notification sent' });
   } catch (error) {
-    res.status(500).json({ message: 'Server Error' });
-  }
-};
-
-// Статистика
-exports.getDashboardStats = async (req, res) => {
-  try {
-    const stats = await User.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalStaked: { $sum: '$balance.stakingUsd' },
-          totalPendingWithdrawal: { $sum: '$balance.pendingWithdrawalUsd' },
-          totalWallet: { $sum: '$balance.walletUsd' },
-          totalUsers: { $sum: 1 }
-        }
-      }
-    ]);
-
-    const data = stats[0] || { totalStaked: 0, totalPendingWithdrawal: 0, totalWallet: 0, totalUsers: 0 };
-
-    res.json({
-      obligations: {
-        currentStaked: parseFloat(data.totalStaked.toString()),
-        pendingPayouts: parseFloat(data.totalPendingWithdrawal.toString()),
-        totalLiability: parseFloat(data.totalStaked.toString()) + parseFloat(data.totalPendingWithdrawal.toString()) + parseFloat(data.totalWallet.toString())
-      },
-      usersCount: data.totalUsers
-    });
-  } catch (error) {
-    console.error(error);
+    console.error('processWithdrawal error:', error);
     res.status(500).json({ message: 'Server Error' });
   }
 };
@@ -186,38 +154,35 @@ exports.getDashboardStats = async (req, res) => {
  */
 exports.getStats = async (req, res) => {
   try {
-    // Выполняем все запросы параллельно для максимальной производительности
-    const [
-      totalUsers,
-      depositData,
-      withdrawalData,
-      stakedData,
-      activeCardsCount
-    ] = await Promise.all([
+    const sumUsd = (field) => ({ $sum: { $toDouble: { $ifNull: [field, 0] } } });
+
+    const [totalUsers, depositData, withdrawalData, balances, activeCardsCount, pendingDeposits, pendingWithdrawals] = await Promise.all([
       User.countDocuments(),
-      // Суммируем только подтвержденные депозиты (если у вас есть такая логика)
-      DepositRequest.aggregate([
-        { $match: { status: 'CONFIRMED' } },
-        { $group: { _id: null, total: { $sum: '$amountSats' } } }
-      ]),
-      // Суммируем только обработанные выводы
-      WithdrawalRequest.aggregate([
-        { $match: { status: 'PROCESSED' } },
-        { $group: { _id: null, total: { $sum: '$amountSats' } } }
-      ]),
-      // Суммируем стейкинг по всем пользователям
-      User.aggregate([
-        { $group: { _id: null, total: { $sum: '$balance.stakingSats' } } }
-      ]),
-      UserCard.countDocuments({ status: 'Active' })
+      DepositRequest.aggregate([{ $match: { status: 'CONFIRMED' } }, { $group: { _id: null, total: sumUsd('$amountUsd') } }]),
+      WithdrawalRequest.aggregate([{ $match: { status: 'PROCESSED' } }, { $group: { _id: null, total: sumUsd('$amountUsd') } }]),
+      User.aggregate([{ $group: {
+        _id: null,
+        staked: sumUsd('$balance.stakingUsd'),
+        wallet: sumUsd('$balance.walletUsd'),
+        pending: sumUsd('$balance.pendingWithdrawalUsd')
+      } }]),
+      UserCard.countDocuments({ status: 'Active' }),
+      DepositRequest.countDocuments({ status: 'PENDING' }),
+      WithdrawalRequest.countDocuments({ status: 'PENDING' })
     ]);
 
+    const b = balances[0] || { staked: 0, wallet: 0, pending: 0 };
     res.status(200).json({
       totalUsers,
-      totalDepositedSats: depositData[0]?.total.toString() || '0',
-      totalWithdrawnSats: withdrawalData[0]?.total.toString() || '0',
-      totalStakedSats: stakedData[0]?.total.toString() || '0',
+      totalDepositedUsd: round2(depositData[0]?.total || 0),
+      totalWithdrawnUsd: round2(withdrawalData[0]?.total || 0),
+      totalStakedUsd: round2(b.staked),
+      totalWalletUsd: round2(b.wallet),
+      totalPendingUsd: round2(b.pending),
+      totalLiabilityUsd: round2(b.staked + b.wallet + b.pending),
       activeCardsCount,
+      pendingDeposits,
+      pendingWithdrawals
     });
   } catch (error) {
     console.error('Admin Stats Error:', error);
@@ -233,16 +198,16 @@ exports.getStats = async (req, res) => {
 exports.getUsers = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const limit = Math.min(parseInt(req.query.limit) || 10, 100);
     const search = req.query.search;
 
     const query = {};
 
     if (search) {
       const searchConditions = [
-        { username: { $regex: search, $options: 'i' } }
+        { username: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
       ];
-      if (!isNaN(parseInt(search))) {
+      if (/^\d+$/.test(search)) {
         searchConditions.push({ tgId: parseInt(search) });
       }
       query.$or = searchConditions;
@@ -251,7 +216,7 @@ exports.getUsers = async (req, res) => {
     const skip = (page - 1) * limit;
 
     const users = await User.find(query)
-      .select('_id username tgId role balance.walletSats createdAt isBanned')
+      .select('_id username tgId role balance createdAt isBanned accountStatus')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
@@ -280,13 +245,14 @@ exports.getUsers = async (req, res) => {
 exports.getUserFullReport = async (req, res) => {
   try {
     const { userId } = req.params;
+    if (!isObjectId(userId)) return res.status(400).json({ message: 'Invalid id' });
 
     const [user, cards, deposits, withdrawals, referralsCount] = await Promise.all([
       User.findById(userId),
       UserCard.find({ userId }).populate('cardTypeId'),
       DepositRequest.find({ userId }).sort({ createdAt: -1 }).limit(25),
       WithdrawalRequest.find({ userId }).sort({ createdAt: -1 }).limit(25),
-      User.countDocuments({ refereeId: user?.tgId }) // предполагая что refereeId хранит tgId
+      User.countDocuments({ uplineUserId: userId })
     ]);
 
     if (!user) {
@@ -339,11 +305,23 @@ exports.updateCardType = async (req, res) => {
         const { typeId } = req.params;
         const { nominalSats, clientAPY, available, isActive } = req.body;
 
+        if (!isObjectId(typeId)) return res.status(400).json({ message: 'Invalid id' });
+
         const updateData = {};
-        if (nominalSats !== undefined) updateData.nominalSats = nominalSats;
-        if (clientAPY !== undefined) updateData.clientAPY = clientAPY;
-        if (available !== undefined) updateData.available = available;
-        if (isActive !== undefined) updateData.isActive = isActive;
+        const num = (v) => Number(v);
+        if (nominalSats !== undefined) {
+            if (!(num(nominalSats) > 0)) return res.status(400).json({ message: 'nominalSats must be > 0' });
+            updateData.nominalSats = String(Math.round(num(nominalSats)));
+        }
+        if (clientAPY !== undefined) {
+            if (!(num(clientAPY) >= 0 && num(clientAPY) <= 100)) return res.status(400).json({ message: 'clientAPY must be 0..100' });
+            updateData.clientAPY = num(clientAPY);
+        }
+        if (available !== undefined) {
+            if (!Number.isInteger(num(available)) || num(available) < 0) return res.status(400).json({ message: 'available must be integer >= 0' });
+            updateData.available = num(available);
+        }
+        if (isActive !== undefined) updateData.isActive = Boolean(isActive);
         
         const updatedCardType = await CardType.findByIdAndUpdate(
             typeId, 
@@ -364,37 +342,34 @@ exports.updateCardType = async (req, res) => {
 exports.rejectWithdrawal = async (req, res) => {
     try {
         const { id } = req.params;
-        const { adminComment } = req.body;
+        if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid id' });
+        const adminComment = String(req.body?.adminComment || '').slice(0, 500) || 'Rejected by admin';
 
-        const withdrawal = await WithdrawalRequest.findById(id);
-        if (!withdrawal || withdrawal.status !== 'PENDING') return res.status(400).json({ message: 'Request not pending' });
+        const withdrawal = await WithdrawalRequest.findOneAndUpdate(
+            { _id: id, status: 'PENDING' },
+            { $set: { status: 'REJECTED', adminComment } },
+            { new: true }
+        );
+        if (!withdrawal) return res.status(400).json({ message: 'Request not pending' });
 
-        const user = await User.findById(withdrawal.userId);
-        if (user) {
-            const amount = parseDecimal(withdrawal.amountUsd);
-            
-            // Возвращаем деньги из Pending в Wallet
-            user.balance.walletUsd = parseDecimal(user.balance.walletUsd) + amount;
-            let newPending = parseDecimal(user.balance.pendingWithdrawalUsd) - amount;
-            user.balance.pendingWithdrawalUsd = newPending < 0 ? 0 : newPending;
-            
-            await user.save();
+        const amount = round2(toNum(withdrawal.amountUsd));
+        // Возвращаем деньги из pending в кошелёк
+        await User.updateOne({ _id: withdrawal.userId }, {
+            $inc: { 'balance.walletUsd': dec(amount), 'balance.pendingWithdrawalUsd': dec(-amount) }
+        });
 
-            // Уведомляем пользователя
-            await Notification.create({
-                userId: user._id,
-                title: 'Withdrawal Failed',
-                message: `Your withdrawal request was rejected. Reason: ${adminComment || 'Security check failed'}. Funds have been returned to your balance.`,
-                type: 'WITHDRAWAL'
-            });
-        }
-
-        withdrawal.status = 'REJECTED';
-        withdrawal.adminComment = adminComment || 'Rejected by admin';
-        await withdrawal.save();
+        await Notification.create({
+            userId: withdrawal.userId,
+            title: 'Withdrawal Rejected',
+            message: `Your withdrawal request was rejected. Reason: ${adminComment}. Funds have been returned to your balance.`,
+            type: 'WITHDRAWAL',
+            key: 'withdrawal_rejected',
+            params: { amount, reason: adminComment }
+        });
 
         res.json({ message: 'Withdrawal rejected and funds returned' });
     } catch (error) {
+        console.error('rejectWithdrawal error:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -402,21 +377,24 @@ exports.rejectWithdrawal = async (req, res) => {
 exports.rejectDeposit = async (req, res) => {
     try {
         const { id } = req.params;
-        const { adminComment } = req.body; // Причина отказа
+        if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid id' });
+        const adminComment = String(req.body?.adminComment || '').slice(0, 500) || 'Transaction not found or invalid';
 
-        const deposit = await DepositRequest.findById(id);
-        if (!deposit || deposit.status !== 'PENDING') return res.status(400).json({ message: 'Request not pending' });
+        const deposit = await DepositRequest.findOneAndUpdate(
+            { _id: id, status: 'PENDING' },
+            { $set: { status: 'REJECTED', adminComment } },
+            { new: true }
+        );
+        if (!deposit) return res.status(400).json({ message: 'Request not pending' });
 
-        deposit.status = 'REJECTED';
-        deposit.adminComment = adminComment || 'Transaction not found or invalid';
-        await deposit.save();
-
-        // Уведомляем пользователя
+        const amount = round2(toNum(deposit.amountUsd));
         await Notification.create({
             userId: deposit.userId,
             title: 'Deposit Rejected',
-            message: `Your deposit request for $${parseDecimal(deposit.amountUsd).toFixed(2)} was rejected. Reason: ${deposit.adminComment}`,
-            type: 'DEPOSIT' // Тип оставим DEPOSIT, но в сообщении будет отказ
+            message: `Your deposit request for $${amount.toFixed(2)} was rejected. Reason: ${adminComment}`,
+            type: 'DEPOSIT',
+            key: 'deposit_rejected',
+            params: { amount, reason: adminComment }
         });
 
         res.json({ message: 'Deposit rejected' });

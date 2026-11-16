@@ -10,4 +10,6 @@ const depositRequestSchema = new mongoose.Schema({
   timestamps: true
 });
 
+depositRequestSchema.index({ txHash: 1 });
+
 module.exports = mongoose.model('DepositRequest', depositRequestSchema);

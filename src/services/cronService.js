@@ -58,7 +58,7 @@ const accrueProfits = async () => {
 
     await Promise.all([
       User.updateOne({ _id: card.userId }, { $inc: { 'balance.totalProfitUsd': profitUsd } }),
-      DailyEarning.updateOne({ userId: card.userId, date: today }, { $inc: { miningSats: profitSats } }, { upsert: true })
+      DailyEarning.updateOne({ userId: card.userId, date: today }, { $inc: { miningSats: profitSats, miningUsd: profitUsd } }, { upsert: true })
     ]);
   });
 };
@@ -111,6 +111,36 @@ const processExpirations = async () => {
   });
 };
 
+/**
+ * «Напомнить»: за сутки до конца цикла (выплата после охлаждения или конец подарочной карты)
+ * бот пишет пользователю. Атомарная пометка remindSentAt — сообщение уходит один раз.
+ */
+const processReminders = async () => {
+  const now = new Date();
+  const soon = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const due = await UserCard.find({
+    remindBeforeEnd: true, remindSentAt: null,
+    unlockAt: { $gt: now, $lte: soon },
+    $or: [{ status: 'Cooling' }, { status: 'Active', isTrial: true }]
+  }).populate('cardTypeId', 'name').lean();
+
+  await inBatches(due, async (card) => {
+    const claimed = await UserCard.findOneAndUpdate(
+      { _id: card._id, remindSentAt: null },
+      { $set: { remindSentAt: now } },
+      { new: true }
+    ).lean();
+    if (!claimed) return;
+    const user = await User.findById(card.userId).select('tgId languageCode').lean();
+    await notifyUser(user, 'cycle_tomorrow', {
+      cardName: card.cardTypeId?.name || 'Tyrex',
+      serial: card.serialNumber,
+      trial: Boolean(card.isTrial),
+      amount: round2(toNum(card.purchasePriceUsd) + toNum(card.coolingPayoutUsd)).toFixed(2)
+    });
+  });
+};
+
 let accrualRunning = false;
 let expirationRunning = false;
 
@@ -128,7 +158,7 @@ const startCronJobs = () => {
   cron.schedule('* * * * *', async () => {
     if (expirationRunning) return;
     expirationRunning = true;
-    try { await processExpirations(); }
+    try { await processExpirations(); await processReminders(); }
     catch (e) { console.error('Cron Expiration Error:', e); }
     finally { expirationRunning = false; }
   });
@@ -137,3 +167,4 @@ const startCronJobs = () => {
 module.exports = startCronJobs;
 module.exports.accrueProfits = accrueProfits;
 module.exports.processExpirations = processExpirations;
+module.exports.processReminders = processReminders;

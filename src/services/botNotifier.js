@@ -11,6 +11,17 @@ const TEXTS = {
     uk: (p) => `✅ Цикл карти ${p.cardName} #${p.serial} завершено.\nНа гаманець зараховано $${p.amount} (тіло $${p.principal} + дохід $${p.profit}).`,
     ru: (p) => `✅ Цикл карты ${p.cardName} #${p.serial} завершён.\nНа кошелёк зачислено $${p.amount} (тело $${p.principal} + доход $${p.profit}).`,
   },
+  cycle_tomorrow: {
+    en: (p) => p.trial
+      ? `⏰ Tomorrow your gift card ${p.cardName} #${p.serial} finishes its term.`
+      : `⏰ Tomorrow the cycle of card ${p.cardName} #${p.serial} ends — about $${p.amount} will be credited to your wallet.`,
+    uk: (p) => p.trial
+      ? `⏰ Завтра завершується термін подарункової карти ${p.cardName} #${p.serial}.`
+      : `⏰ Завтра завершується цикл карти ${p.cardName} #${p.serial} — на гаманець надійде близько $${p.amount}.`,
+    ru: (p) => p.trial
+      ? `⏰ Завтра заканчивается срок подарочной карты ${p.cardName} #${p.serial}.`
+      : `⏰ Завтра заканчивается цикл карты ${p.cardName} #${p.serial} — на кошелёк придёт около $${p.amount}.`,
+  },
   trial_finished: {
     en: (p) => `🎁 Your gift card ${p.cardName} #${p.serial} has finished its term. Choose your first card in the shop to keep earning.`,
     uk: (p) => `🎁 Термін подарункової карти ${p.cardName} #${p.serial} завершився. Оберіть першу карту в магазині, щоб продовжити.`,

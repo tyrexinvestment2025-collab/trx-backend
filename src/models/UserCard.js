@@ -20,7 +20,10 @@ const userCardSchema = new mongoose.Schema({
 
   imageUrl: { type: String },
   unlockAt: { type: Date },
-  lastAccrualDate: { type: Date, default: Date.now }
+  lastAccrualDate: { type: Date, default: Date.now },
+  // «Напомнить»: бот пишет за сутки до конца цикла (unlockAt)
+  remindBeforeEnd: { type: Boolean, default: false },
+  remindSentAt: { type: Date }
 }, { timestamps: true });
 
 userCardSchema.index({ cardTypeId: 1, serialNumber: 1 }, { unique: true });

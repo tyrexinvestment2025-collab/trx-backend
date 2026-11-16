@@ -3,6 +3,7 @@ const UserCard = require('../models/UserCard');
 const User = require('../models/User');
 const DailyEarning = require('../models/DailyProfit');
 const ReferralReward = require('../models/ReferralReward');
+const priceService = require('./priceService2');
 
 /**
  * Ежедневная реферальная выплата.
@@ -45,7 +46,7 @@ const runDailyReferralPayouts = async () => {
       await User.updateOne({ _id: uplineId }, { $inc: { 'balance.referralSats': dailyReward } });
       await DailyEarning.updateOne(
         { userId: uplineId, date: today },
-        { $inc: { referralSats: dailyReward } },
+        { $inc: { referralSats: dailyReward, referralUsd: ((priceService.getBitcoinPrice() || 0) * dailyReward) / 100000000 } },
         { upsert: true }
       );
     }

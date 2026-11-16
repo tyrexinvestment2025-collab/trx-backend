@@ -5,6 +5,9 @@ const dailyEarningSchema = new mongoose.Schema({
   date: { type: String, required: true }, // Формат "YYYY-MM-DD"
   miningSats: { type: Number, default: 0 },
   referralSats: { type: Number, default: 0 },
+  // Те же суммы в USD по курсу в момент начисления (для аналитики; старые записи — только сатоши)
+  miningUsd: { type: Number, default: 0 },
+  referralUsd: { type: Number, default: 0 },
 }, { timestamps: true });
 
 // Уникальный индекс, чтобы не дублировать записи за один день

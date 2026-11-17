@@ -16,7 +16,7 @@ const MAX_DEPOSIT_USD = Number(process.env.MAX_DEPOSIT_USD) || 1_000_000;
 // Адрес для депозитов (пока заглушка — заменить в .env перед запуском)
 const DEPOSIT_BTC_ADDRESS = process.env.DEPOSIT_BTC_ADDRESS || 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh';
 
-const TRC20_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
+const { isValidTronAddress } = require('../utils/tron');
 const BTC_TXID_RE = /^[a-fA-F0-9]{64}$/;
 
 /**
@@ -164,7 +164,7 @@ exports.requestWithdrawal = async (req, res) => {
         if (amount < MIN_WITHDRAWAL_USD) {
             return res.status(400).json({ message: `Minimum withdrawal is $${MIN_WITHDRAWAL_USD}`, code: 'BELOW_MINIMUM', min: MIN_WITHDRAWAL_USD });
         }
-        if (!TRC20_RE.test(walletAddress)) {
+        if (!isValidTronAddress(walletAddress)) {
             return res.status(400).json({ message: 'Invalid TRC20 address', code: 'INVALID_ADDRESS' });
         }
 

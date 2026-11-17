@@ -86,7 +86,7 @@ exports.getCardTypes = async (req, res) => {
             ...t,
             id: t._id,
             imageUrl: `${baseUrl}${t.imagePath}`,
-            priceUSDT: Math.round((toNum(t.nominalSats) / SATS_IN_BTC) * btcPrice)
+            priceUSDT: round2((toNum(t.nominalSats) / SATS_IN_BTC) * btcPrice)
         })));
     } catch (e) {
         console.error(`[getCardTypes Error]: ${e.message}`);
@@ -110,7 +110,7 @@ exports.getCollectionItems = async (req, res) => {
 
         const baseUrl = getBaseUrl(req);
         const nominalSats = toNum(cardType.nominalSats);
-        const priceUSDT = Math.round((nominalSats / SATS_IN_BTC) * btcPrice);
+        const priceUSDT = round2((nominalSats / SATS_IN_BTC) * btcPrice);
 
         const sold = await UserCard.find({ cardTypeId: id }).select('serialNumber').lean();
         const soldSet = new Set(sold.map(s => s.serialNumber));

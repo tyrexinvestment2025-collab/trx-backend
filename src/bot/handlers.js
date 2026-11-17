@@ -10,6 +10,7 @@ const CardType = require('../models/CardType');
 const DepositRequest = require('../models/DepositRequest');
 const WithdrawalRequest = require('../models/WithdrawalRequest');
 const TgFile = require('../models/TgFile');
+const Outbox = require('../models/Outbox');
 const priceService = require('../services/priceService2');
 const requestService = require('../services/requestService');
 const { findOrCreateUser, getAdminIds } = require('../services/userService');
@@ -32,7 +33,7 @@ const send = (ctx, text, extra = {}) => ctx.reply(text, { parse_mode: 'HTML', li
 const dbUser = (ctx) => User.findOne({ tgId: ctx.from.id });
 
 /** Язык ответа: из профиля, иначе из Telegram */
-const langFor = (user, ctx) => langOf(user || ctx.from?.language_code);
+const langFor = (user, ctx) => (LANGS.includes(user?.lang) ? user.lang : langOf(ctx.from?.language_code || user?.languageCode));
 
 /** Заблокированному — одно сообщение с поддержкой, без данных */
 const guardBanned = async (ctx, user) => {
@@ -229,16 +230,18 @@ const loadRequest = async (kind, id) => {
   const r = await Model.findById(id).lean();
   if (!r) return null;
   const u = await User.findById(r.userId).select('tgId username firstName balance').lean();
-  return { r, u };
+  // Снимок «баланс после заявки» из исходной карточки (иначе после обработки показался бы текущий баланс)
+  const card = await Outbox.findOne({ eventId: `admin.${kind === 'dep' ? 'deposit' : 'withdrawal'}:${id}` }).select('params').lean();
+  return { r, u, balanceAtRequest: card?.params?.balance };
 };
-const cardText = (kind, r, u) => {
+const cardText = (kind, r, u, balanceAtRequest) => {
   const base = {
     id: String(r._id), amount: round2(toNum(r.amountUsd)), createdAt: r.createdAt,
     tgId: u?.tgId, username: u?.username && !/^User\d+$/.test(u.username) ? u.username : null, firstName: u?.firstName,
   };
   return kind === 'dep'
     ? A.depositCard({ ...base, txHash: r.txHash })
-    : A.withdrawalCard({ ...base, address: r.walletAddress, balance: round2(toNum(u?.balance?.walletUsd)) });
+    : A.withdrawalCard({ ...base, address: r.walletAddress, balance: balanceAtRequest ?? round2(toNum(u?.balance?.walletUsd)) });
 };
 const whoShort = (u) => (u?.username && !/^User\d+$/.test(u.username) ? `@${escapeHtml(u.username)}` : `id ${u?.tgId}`);
 const NOT_PENDING = 'Заявка уже обработана';
@@ -248,7 +251,7 @@ async function onAdminAction(ctx) {
   if (!isAdminTg(ctx.from.id)) return ctx.answerCallbackQuery({ text: 'Нет прав', show_alert: true });
   const data = await loadRequest(kind, id);
   if (!data) return ctx.answerCallbackQuery({ text: 'Заявка не найдена', show_alert: true });
-  const { r, u } = data;
+  const { r, u, balanceAtRequest } = data;
   const amount = money(toNum(r.amountUsd), 'ru');
 
   if (r.status !== 'PENDING') {
@@ -256,7 +259,7 @@ async function onAdminAction(ctx) {
     return ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
   }
 
-  const editCard = (suffix, markup) => ctx.editMessageText(`${cardText(kind, r, u)}${suffix ? `\n\n${suffix}` : ''}`, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: markup }).catch(() => {});
+  const editCard = (suffix, markup) => ctx.editMessageText(`${cardText(kind, r, u, balanceAtRequest)}${suffix ? `\n\n${suffix}` : ''}`, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: markup }).catch(() => {});
 
   // Шаг 1 → вопрос «Да / Нет»
   if (action === 'ok' || action === 'paid') {
@@ -278,7 +281,7 @@ async function onAdminAction(ctx) {
   if (action === 'paid!') {
     await ctx.answerCallbackQuery();
     await editCard('<i>Жду хэш выплаты ответом ниже или нажмите «Без хэша».</i>', kb([{ text: 'Без хэша', callback_data: `wd:nohash:${id}` }, { text: 'Отмена', callback_data: `wd:back:${id}` }]));
-    return ctx.reply(`Хэш выплаты для заявки [wd:${id}] — ответьте на это сообщение.`, {
+    return ctx.reply(`Хэш выплаты для заявки [wd:${id}] — ответьте на это сообщение. Без хэша — кнопка «Без хэша» в карточке выше.`, {
       ...(ctx.msg?.message_thread_id ? { message_thread_id: ctx.msg.message_thread_id } : {}),
       reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'Хэш транзакции' },
     });
@@ -329,6 +332,13 @@ async function onMyChatMember(ctx) {
 /** Регистрация всех обработчиков на экземпляре бота */
 function register(bot) {
   bot.on('my_chat_member', onMyChatMember);
+  // Любое сообщение в личке значит, что бот может писать этому пользователю (учитывается в /stats)
+  bot.on('message', async (ctx, next) => {
+    if (isPrivate(ctx) && ctx.from) {
+      await User.updateOne({ tgId: ctx.from.id, canMessage: { $ne: true } }, { $set: { canMessage: true, botBlockedAt: null } }).catch(() => {});
+    }
+    return next();
+  });
   bot.command('start', (ctx) => (isPrivate(ctx) ? onStart(ctx) : undefined));
   bot.command('app', onApp);
   bot.command('wallet', (ctx) => (isPrivate(ctx) ? onWallet(ctx) : undefined));

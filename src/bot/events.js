@@ -39,8 +39,10 @@ async function closeAdminCard(kind, request, user, result) {
   const eventId = `admin.${kind}:${request._id}`;
   const card = await Outbox.findOne({ eventId }).lean();
   const base = kind === 'deposit' ? depositCardParams(request, user) : withdrawalCardParams(request, user);
-  const params = { ...base, ...result, at: new Date(), closed: true };
   if (!card) return;
+  // «Баланс после заявки» — как на момент создания, а не после обработки
+  if (kind !== 'deposit' && card.params?.balance !== undefined) base.balance = card.params.balance;
+  const params = { ...base, ...result, at: new Date(), closed: true };
   if (card.status !== 'sent' || !card.messageId) {
     // Карточка ещё не ушла — отправим сразу закрытой
     await Outbox.updateOne({ _id: card._id, status: 'queued' }, { $set: { params } });

@@ -39,11 +39,13 @@ const getHistory = async (range) => {
     const points = klines.map(k => [Number(k[6]), Number(k[4])]).filter(p => p[1] > 0);
     const first = points[0]?.[1] || 0;
     const last = points[points.length - 1]?.[1] || 0;
+    const change24hPct = Number(ticker?.priceChangePercent) || 0;
     const data = {
         range,
         points,
-        changePct: first > 0 ? ((last - first) / first) * 100 : 0,
-        change24hPct: Number(ticker?.priceChangePercent) || 0,
+        // За 24 ч — тот же показатель, что в шапке (тикер Binance), чтобы цифры на экране не расходились
+        changePct: range === '24h' ? change24hPct : first > 0 ? ((last - first) / first) * 100 : 0,
+        change24hPct,
         high: Math.max(...points.map(p => p[1])),
         low: Math.min(...points.map(p => p[1])),
     };

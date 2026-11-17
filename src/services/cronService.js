@@ -35,7 +35,10 @@ const accrueProfits = async () => {
 
   const now = new Date();
   const today = now.toISOString().split('T')[0];
-  const activeCards = await UserCard.find({ status: 'Active' }).populate('cardTypeId', 'clientAPY').lean();
+  const allActive = await UserCard.find({ status: 'Active' }).populate('cardTypeId', 'clientAPY').lean();
+  // Карты удалённых пользователей не начисляем (их владельца нет — начислять некуда)
+  const owners = new Set((await User.find({ _id: { $in: [...new Set(allActive.map(c => String(c.userId)))] } }).select('_id').lean()).map(u => String(u._id)));
+  const activeCards = allActive.filter(c => owners.has(String(c.userId)));
 
   await inBatches(activeCards, async (card) => {
     if (!card.cardTypeId) return;

@@ -1,9 +1,7 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-/** Принятые update_id вебхука — повтор того же апдейта не обрабатывается. Хранятся 3 дня. */
-const tgUpdateSchema = new mongoose.Schema({
-  updateId: { type: Number, required: true, unique: true },
-  receivedAt: { type: Date, default: Date.now, expires: 3 * 24 * 3600 }
+/** Принятые update_id вебхука — повтор того же апдейта не обрабатывается. Хранятся 3 дня (db/cleanup). */
+module.exports = new Model('TgUpdate', 'tg_updates', {
+  updateId: { type: 'bigint' },
+  receivedAt: { type: 'date', default: () => new Date() },
 });
-
-module.exports = mongoose.model('TgUpdate', tgUpdateSchema);

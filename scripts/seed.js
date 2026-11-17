@@ -2,7 +2,7 @@
 // Этот скрипт очищает коллекции cardtypes и usercards, и заполняет cardtypes новыми данными с учетом maxSupply
 
 require('dotenv').config(); 
-const mongoose = require('mongoose');
+const db = require('../src/db');
 const connectDB = require('../src/config/db'); 
 const CardType = require('../src/models/CardType'); 
 const UserCard = require('../src/models/UserCard'); // Импортируем, чтобы очистить старые покупки
@@ -49,7 +49,7 @@ const cards = [
 const seedDatabase = async () => {
   try {
     await connectDB();
-    console.log('MongoDB connected for seeding...');
+    console.log('PostgreSQL connected for seeding...');
 
     // 1. Очищаем покупки пользователей (ВАЖНО: старые карты без serialNumber сломают новый фронтенд)
     await UserCard.deleteMany({});
@@ -67,8 +67,8 @@ const seedDatabase = async () => {
     console.error('Error seeding data:', error);
   } finally {
     // Закрываем соединение
-    await mongoose.connection.close();
-    console.log('MongoDB connection closed.');
+    await db.close();
+    console.log('PostgreSQL connection closed.');
     process.exit(0);
   }
 };

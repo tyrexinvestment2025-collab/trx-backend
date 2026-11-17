@@ -35,7 +35,7 @@ async function findOrCreateUser(tgUser, { startPayload, via } = {}) {
   while (await User.exists({ referralCode: code })) code = generateReferralCode();
 
   const signupBonus = Number(process.env.SIGNUP_BONUS_USD) || 0;
-  const doc = new User({
+  const data = {
     tgId,
     username: tgUser.username || `User${tgId}`,
     firstName: String(tgUser.first_name || '').slice(0, 64),
@@ -48,10 +48,10 @@ async function findOrCreateUser(tgUser, { startPayload, via } = {}) {
     canMessage: via === 'bot',
     balance: { walletUsd: signupBonus.toFixed(2) },
     accountStatus: 'NEWBIE'
-  });
+  };
 
   try {
-    await doc.save();
+    const doc = await User.create(data);
     return { user: doc, created: true, inviter };
   } catch (e) {
     if (e.code === 11000) {

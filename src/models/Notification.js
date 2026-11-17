@@ -1,16 +1,12 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const notificationSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  title: { type: String, required: true },
-  message: { type: String, required: true },
-  type: { type: String, enum: ['INFO', 'DEPOSIT', 'WITHDRAWAL', 'SYSTEM'], default: 'INFO' },
-  isRead: { type: Boolean, default: false },
+module.exports = new Model('Notification', 'notifications', {
+  userId: { type: 'ref', ref: 'User' },
+  title: { type: 'text' },
+  message: { type: 'text' },
+  type: { type: 'text', default: 'INFO' }, // INFO | DEPOSIT | WITHDRAWAL | SYSTEM
+  isRead: { type: 'bool', default: false },
   // Ключ локализации + параметры: фронт переводит сам, title/message — запасной текст
-  key: { type: String },
-  params: { type: mongoose.Schema.Types.Mixed },
-}, {
-  timestamps: true
-});
-
-module.exports = mongoose.model('Notification', notificationSchema);
+  key: { type: 'text' },
+  params: { type: 'json' },
+}, { timestamps: true });

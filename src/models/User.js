@@ -1,74 +1,59 @@
-const mongoose = require('mongoose');
-const { generateReferralCode } = require('../utils/referralCodeGenerator'); 
+const { Model } = require('../db/model');
+const { generateReferralCode } = require('../utils/referralCodeGenerator');
 
-const userSchema = new mongoose.Schema({
-  tgId: { type: Number, required: true, unique: true, index: true },
-  username: { type: String, default: '' },
-  languageCode: { type: String, default: 'en' }, // из Telegram initData, для сообщений бота
-  role: { type: String, enum: ['USER', 'ADMIN'], default: 'USER' },
-  
-  referralCode: { type: String, unique: true, sparse: true },
-  uplineUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+const User = new Model('User', 'users', {
+  tgId: { type: 'bigint' },
+  username: { type: 'text', default: '' },
+  languageCode: { type: 'text', default: 'en' }, // из Telegram initData, для сообщений бота
+  role: { type: 'text', default: 'USER' },       // USER | ADMIN
 
-  // --- НОВЫЕ ПОЛЯ ДЛЯ ТРИАЛА И CRM ---
-  isTrialActivated: { type: Boolean, default: false }, // Нажал ли "Получить NFT"
-  trialActivatedAt: { type: Date }, // Дата активации подарка
-  totalDepositedUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' }, // Общая сумма всех пополнений
-  // ----------------------------------
+  referralCode: { type: 'text' },
+  uplineUserId: { type: 'ref', ref: 'User', default: null },
 
-  accountStatus: { 
-    type: String, 
-    enum: ['NEWBIE', 'DEPOSITOR', 'HOLDER', 'MINER'], 
-    default: 'NEWBIE' 
-  },
-  analytics: {
-        financialGoal: { type: Number, default: 50000 },
-  },
-  balance: {
-    walletUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
-    stakingUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' }, 
-    pendingWithdrawalUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
-    totalProfitUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
-    referralUsd: { type: mongoose.Schema.Types.Decimal128, default: '0.0' },
+  // Триал и CRM
+  isTrialActivated: { type: 'bool', default: false },
+  trialActivatedAt: { type: 'date' },
+  totalDepositedUsd: { type: 'decimal', default: '0.0' },
+  accountStatus: { type: 'text', default: 'NEWBIE' }, // NEWBIE | DEPOSITOR | HOLDER | MINER
 
-    walletSats: { type: Number, default: 0 }, 
-    lastDailyQuizAt: { type: Date, default: null },
-    referralSats: { type: Number, default: 0 } 
-  },
-  isBanned: { type: Boolean, default: false },
+  'analytics.financialGoal': { type: 'double', default: 50000 },
 
-  // --- Бот и уведомления ---
-  firstName: { type: String, default: '' },            // имя из Telegram — для «По вашей ссылке пришёл …»
-  lang: { type: String, enum: ['ru', 'uk', 'en', null], default: null }, // выбранный язык (бот и приложение); null — ещё не выбран
-  canMessage: { type: Boolean, default: false },        // нажал Start или разрешил писать из Mini App
-  botBlockedAt: { type: Date, default: null },
-  timezone: { type: String, default: 'Europe/Kyiv' },
-  notifPrefs: {
-    cards: { type: Boolean, default: true },
-    partners: { type: Boolean, default: true },
-    news: { type: Boolean, default: true },
-    digest: { type: Boolean, default: false },
-    btc: { type: Boolean, default: false }
-  },
-  pendingRef: { type: String, default: null },          // реф-код из /start до первого входа в приложение
-  source: { type: String, default: null },              // ref / ch_<пост> / p_<раздел> / direct
-  channelGiftAt: { type: Date, default: null }
+  'balance.walletUsd': { type: 'decimal', default: '0.0' },
+  'balance.stakingUsd': { type: 'decimal', default: '0.0' },
+  'balance.pendingWithdrawalUsd': { type: 'decimal', default: '0.0' },
+  'balance.totalProfitUsd': { type: 'decimal', default: '0.0' },
+  'balance.referralUsd': { type: 'decimal', default: '0.0' },
+  'balance.walletSats': { type: 'double', default: 0 },
+  'balance.lastDailyQuizAt': { type: 'date', default: null },
+  'balance.referralSats': { type: 'double', default: 0 },
+
+  isBanned: { type: 'bool', default: false },
+
+  // Бот и уведомления
+  firstName: { type: 'text', default: '' },       // имя из Telegram — для «По вашей ссылке пришёл …»
+  lang: { type: 'text', default: null },          // ru | uk | en; null — ещё не выбран
+  canMessage: { type: 'bool', default: false },   // нажал Start или разрешил писать из Mini App
+  botBlockedAt: { type: 'date', default: null },
+  timezone: { type: 'text', default: 'Europe/Kyiv' },
+  'notifPrefs.cards': { type: 'bool', default: true },
+  'notifPrefs.partners': { type: 'bool', default: true },
+  'notifPrefs.news': { type: 'bool', default: true },
+  'notifPrefs.digest': { type: 'bool', default: false },
+  'notifPrefs.btc': { type: 'bool', default: false },
+  pendingRef: { type: 'text', default: null },    // реф-код из /start до первого входа в приложение
+  source: { type: 'text', default: null },        // ref / ch_<пост> / p_<раздел> / direct
+  channelGiftAt: { type: 'date', default: null },
 }, {
-  timestamps: true
+  timestamps: true,
+  hooks: {
+    // Реф-код при создании, если не задан
+    async preCreate(doc, model) {
+      if (doc.referralCode) return;
+      let code = generateReferralCode();
+      while (await model.exists({ referralCode: code })) code = generateReferralCode();
+      doc.referralCode = code;
+    },
+  },
 });
 
-userSchema.pre('save', async function() {
-  if (this.isNew && !this.referralCode) {
-    let code;
-    let isUnique = false;
-    const User = mongoose.model('User'); 
-    while (!isUnique) {
-      code = generateReferralCode();
-      const existingUser = await User.findOne({ referralCode: code });
-      if (!existingUser) isUnique = true;
-    }
-    this.referralCode = code;
-  }
-});
-
-module.exports = mongoose.model('User', userSchema);
+module.exports = User;

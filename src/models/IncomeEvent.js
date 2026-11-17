@@ -1,18 +1,15 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
 /**
  * Зачисления на кошелёк, которые не являются депозитом:
  * - CARD_PAYOUT   — выплата тела карты + прибыли после охлаждения
  * - CARD_REFUND   — продажа карты обратно (возврат цены покупки)
  * - REFERRAL_CLAIM — реферальная награда, переведённая в USD
- * Используется для фильтра «Доход» в истории кошелька.
+ * meta: { cardId, serialNumber, cardName, principalUsd, profitUsd, sats, btcPrice }
  */
-const incomeEventSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  type: { type: String, enum: ['CARD_PAYOUT', 'CARD_REFUND', 'REFERRAL_CLAIM'], required: true },
-  amountUsd: { type: mongoose.Schema.Types.Decimal128, required: true },
-  // Детали: { cardId, serialNumber, cardName, principalUsd, profitUsd, sats, btcPrice }
-  meta: { type: mongoose.Schema.Types.Mixed, default: {} }
+module.exports = new Model('IncomeEvent', 'income_events', {
+  userId: { type: 'ref', ref: 'User' },
+  type: { type: 'text' },
+  amountUsd: { type: 'decimal' },
+  meta: { type: 'json', default: () => ({}) },
 }, { timestamps: true });
-
-module.exports = mongoose.model('IncomeEvent', incomeEventSchema);

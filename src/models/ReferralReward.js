@@ -1,15 +1,10 @@
-// src/models/ReferralReward.js
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const referralRewardSchema = new mongoose.Schema({
-  uplineUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  partnerUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  amountSats: { type: Number, required: true },
-  sourceCardId: { type: mongoose.Schema.Types.ObjectId, ref: 'UserCard' }, // От какой карты пришло
-  date: { type: String, required: true }, // Формат "YYYY-MM-DD" для легкой группировки
+/** Реферальная выплата. UNIQUE (source_card_id, date): одна выплата за карту за день. */
+module.exports = new Model('ReferralReward', 'referral_rewards', {
+  uplineUserId: { type: 'ref', ref: 'User' },
+  partnerUserId: { type: 'ref', ref: 'User' },
+  amountSats: { type: 'double' },
+  sourceCardId: { type: 'ref', ref: 'UserCard' }, // От какой карты пришло
+  date: { type: 'text' }, // "YYYY-MM-DD" для группировки
 }, { timestamps: true });
-
-// Идемпотентность: одна выплата за карту за день (защита от повторного запуска cron / нескольких инстансов)
-referralRewardSchema.index({ sourceCardId: 1, date: 1 }, { unique: true, partialFilterExpression: { sourceCardId: { $exists: true } } });
-
-module.exports = mongoose.model('ReferralReward', referralRewardSchema);

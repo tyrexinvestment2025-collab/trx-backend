@@ -1,14 +1,12 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const cardTypeSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  nominalSats: { type: mongoose.Schema.Types.Decimal128, required: true },
-  clientAPY: { type: Number, required: true },
-  referralAPY: { type: Number, default: 0 },
-  maxSupply: { type: Number, required: true },
-  available: { type: Number, default: 0 },
-  imagePath: { type: String, required: true }, 
-  isActive: { type: Boolean, default: true }
+module.exports = new Model('CardType', 'card_types', {
+  name: { type: 'text' },
+  nominalSats: { type: 'decimal' },
+  clientAPY: { type: 'double' },
+  referralAPY: { type: 'double', default: 0 },
+  maxSupply: { type: 'int' },
+  available: { type: 'int', default: 0 },
+  imagePath: { type: 'text' },
+  isActive: { type: 'bool', default: true },
 }, { timestamps: true });
-
-module.exports = mongoose.model('CardType', cardTypeSchema);

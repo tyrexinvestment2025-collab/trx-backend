@@ -1,4 +1,3 @@
-const mongoose = require('mongoose');
 const User = require('../models/User');
 const UserCard = require('../models/UserCard');
 const IncomeEvent = require('../models/IncomeEvent');
@@ -134,7 +133,7 @@ const buildUpcoming = async (userId) => {
 exports.getAnalyticsDashboard = async (req, res) => {
     try {
         const btcPrice = priceService.getBitcoinPrice();
-        const userId = new mongoose.Types.ObjectId(String(req.user._id));
+        const userId = String(req.user._id);
         const user = await User.findById(userId).select('balance analytics').lean();
 
         const [fng, activeCards, income, upcoming] = await Promise.all([

@@ -47,7 +47,7 @@ const webhookHandler = async (req, res) => {
   catch (e) { console.error('[bot] update failed:', e.message); }
 };
 
-/** Итог дня для админ-чата (тема «Пользователи») */
+/** Итог дня для админ-чата — в General (без темы) */
 async function dailySummary() {
   const now = new Date();
   const since = new Date(now.getTime() - 86400_000);
@@ -60,7 +60,7 @@ async function dailySummary() {
   ]);
   const date = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Kyiv' }).format(now);
   await enqueueAdmin({
-    eventId: `admin.daily:${now.toISOString().slice(0, 10)}`, topic: 'users', template: 'admin.daily',
+    eventId: `admin.daily:${now.toISOString().slice(0, 10)}`, topic: null, template: 'admin.daily',
     params: {
       date, newUsers,
       depositsCount: deps.length, depositsUsd: round2(deps.reduce((a, d) => a + toNum(d.amountUsd), 0)),

@@ -18,6 +18,12 @@ exports.login = async (req, res) => {
 
     // 1. Проверяем подпись и свежесть
     if (!verifyTelegramWebAppData(initData)) {
+        // Причина отказа в логе (без подписи и данных пользователя)
+        try {
+            const p = new URLSearchParams(String(initData));
+            const age = Math.floor(Date.now() / 1000) - Number(p.get('auth_date'));
+            console.warn(`[auth] initData rejected: keys=${[...p.keys()].join(',')} age=${age}s len=${String(initData).length}`);
+        } catch { console.warn('[auth] initData rejected: unparsable'); }
         return res.status(401).json({ message: 'Invalid data' });
     }
 

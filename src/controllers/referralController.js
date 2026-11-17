@@ -79,11 +79,11 @@ exports.getReferralInfo = async (req, res) => {
         const investorsCount = await UserCard.distinct('userId', { userId: { $in: referralIds }, isTrial: { $ne: true } });
 
         const types = await CardType.find({ isActive: true }).select('referralAPY').lean();
-        const claimedAgg = await IncomeEvent.aggregate([
-            { $match: { userId: user._id, type: 'REFERRAL_CLAIM' } },
-            { $group: { _id: null, sats: { $sum: '$meta.sats' } } }
-        ]);
-        const claimedSats = claimedAgg[0]?.sats || 0;
+        const { rows: claimedRows } = await IncomeEvent.query(
+            `SELECT COALESCE(SUM((meta->>'sats')::double precision), 0) AS sats FROM income_events WHERE user_id = $1 AND type = 'REFERRAL_CLAIM'`,
+            [String(user._id)]
+        );
+        const claimedSats = Number(claimedRows[0]?.sats) || 0;
         const refApys = types.map(t => t.referralAPY || 0);
 
         res.json({

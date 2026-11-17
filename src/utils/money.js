@@ -1,6 +1,6 @@
-const mongoose = require('mongoose');
+const { Dec, isId } = require('../db/model');
 
-/** Decimal128 / string / number → number (NaN → 0) */
+/** NUMERIC (Dec) / string / number → number (NaN → 0) */
 const toNum = (v) => {
     if (v === null || v === undefined) return 0;
     const n = parseFloat(v.toString());
@@ -10,9 +10,10 @@ const toNum = (v) => {
 /** Округление до центов */
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-/** Значение для $inc по Decimal128-полю */
-const dec = (n) => mongoose.Types.Decimal128.fromString(round2(n).toFixed(2));
+/** Денежное значение для $inc / $set по NUMERIC-полю (до центов) */
+const dec = (n) => new Dec(round2(n).toFixed(2));
 
-const isObjectId = (v) => typeof v === 'string' && mongoose.Types.ObjectId.isValid(v);
+/** id записи (24 hex, формат бывших ObjectId) */
+const isObjectId = (v) => isId(v);
 
 module.exports = { toNum, round2, dec, isObjectId };

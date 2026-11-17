@@ -1,16 +1,12 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const dailyEarningSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  date: { type: String, required: true }, // Формат "YYYY-MM-DD"
-  miningSats: { type: Number, default: 0 },
-  referralSats: { type: Number, default: 0 },
+/** Начисления за день (YYYY-MM-DD) — одна строка на пользователя в день */
+module.exports = new Model('DailyEarning', 'daily_earnings', {
+  userId: { type: 'ref', ref: 'User' },
+  date: { type: 'text' },
+  miningSats: { type: 'double', default: 0 },
+  referralSats: { type: 'double', default: 0 },
   // Те же суммы в USD по курсу в момент начисления (для аналитики; старые записи — только сатоши)
-  miningUsd: { type: Number, default: 0 },
-  referralUsd: { type: Number, default: 0 },
+  miningUsd: { type: 'double', default: 0 },
+  referralUsd: { type: 'double', default: 0 },
 }, { timestamps: true });
-
-// Уникальный индекс, чтобы не дублировать записи за один день
-dailyEarningSchema.index({ userId: 1, date: 1 }, { unique: true });
-
-module.exports = mongoose.model('DailyEarning', dailyEarningSchema);

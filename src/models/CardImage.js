@@ -1,12 +1,7 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const cardImageSchema = new mongoose.Schema({
-  cardTypeId: { type: mongoose.Schema.Types.ObjectId, ref: 'CardType', required: true, index: true },
-  imageData: { type: String, required: true },
-  index: { type: Number, required: true, index: true } // Индекс ускоряет поиск в разы
+module.exports = new Model('CardImage', 'card_images', {
+  cardTypeId: { type: 'ref', ref: 'CardType' },
+  imageData: { type: 'text' },
+  index: { type: 'int' },
 });
-
-// Составной индекс для супер-быстрого нахождения конкретной картинки
-cardImageSchema.index({ cardTypeId: 1, index: 1 });
-
-module.exports = mongoose.model('CardImage', cardImageSchema);

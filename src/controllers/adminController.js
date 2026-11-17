@@ -112,28 +112,24 @@ exports.processWithdrawal = async (req, res) => {
  */
 exports.getStats = async (req, res) => {
   try {
-    const sumUsd = (field) => ({ $sum: { $toDouble: { $ifNull: [field, 0] } } });
+    const one = async (sql) => (await User.query(sql)).rows[0];
 
     const [totalUsers, depositData, withdrawalData, balances, activeCardsCount, pendingDeposits, pendingWithdrawals] = await Promise.all([
       User.countDocuments(),
-      DepositRequest.aggregate([{ $match: { status: 'CONFIRMED' } }, { $group: { _id: null, total: sumUsd('$amountUsd') } }]),
-      WithdrawalRequest.aggregate([{ $match: { status: 'PROCESSED' } }, { $group: { _id: null, total: sumUsd('$amountUsd') } }]),
-      User.aggregate([{ $group: {
-        _id: null,
-        staked: sumUsd('$balance.stakingUsd'),
-        wallet: sumUsd('$balance.walletUsd'),
-        pending: sumUsd('$balance.pendingWithdrawalUsd')
-      } }]),
+      one(`SELECT COALESCE(SUM(amount_usd), 0) AS total FROM deposit_requests WHERE status = 'CONFIRMED'`),
+      one(`SELECT COALESCE(SUM(amount_usd), 0) AS total FROM withdrawal_requests WHERE status = 'PROCESSED'`),
+      one(`SELECT COALESCE(SUM(balance_staking_usd), 0) AS staked, COALESCE(SUM(balance_wallet_usd), 0) AS wallet,
+                  COALESCE(SUM(balance_pending_withdrawal_usd), 0) AS pending FROM users`),
       UserCard.countDocuments({ status: 'Active' }),
       DepositRequest.countDocuments({ status: 'PENDING' }),
       WithdrawalRequest.countDocuments({ status: 'PENDING' })
     ]);
 
-    const b = balances[0] || { staked: 0, wallet: 0, pending: 0 };
+    const b = { staked: toNum(balances.staked), wallet: toNum(balances.wallet), pending: toNum(balances.pending) };
     res.status(200).json({
       totalUsers,
-      totalDepositedUsd: round2(depositData[0]?.total || 0),
-      totalWithdrawnUsd: round2(withdrawalData[0]?.total || 0),
+      totalDepositedUsd: round2(toNum(depositData.total)),
+      totalWithdrawnUsd: round2(toNum(withdrawalData.total)),
       totalStakedUsd: round2(b.staked),
       totalWalletUsd: round2(b.wallet),
       totalPendingUsd: round2(b.pending),

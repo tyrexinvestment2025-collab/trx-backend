@@ -1,15 +1,9 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const depositRequestSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  amountUsd: { type: mongoose.Schema.Types.Decimal128, required: true }, 
-  status: { type: String, enum: ['PENDING', 'CONFIRMED', 'REJECTED'], default: 'PENDING' },
-  txHash: { type: String, default: '' },
-  adminComment: { type: String }
-}, {
-  timestamps: true
-});
-
-depositRequestSchema.index({ txHash: 1 });
-
-module.exports = mongoose.model('DepositRequest', depositRequestSchema);
+module.exports = new Model('DepositRequest', 'deposit_requests', {
+  userId: { type: 'ref', ref: 'User' },
+  amountUsd: { type: 'decimal' },
+  status: { type: 'text', default: 'PENDING' }, // PENDING | CONFIRMED | REJECTED
+  txHash: { type: 'text', default: '' },
+  adminComment: { type: 'text' },
+}, { timestamps: true });

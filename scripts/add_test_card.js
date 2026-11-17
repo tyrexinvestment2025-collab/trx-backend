@@ -1,5 +1,5 @@
 require('dotenv').config();
-const mongoose = require('mongoose');
+const db = require('../src/db');
 const fs = require('fs');
 const path = require('path');
 const connectDB = require('../src/config/db');
@@ -56,7 +56,7 @@ const reseed = async () => {
   } catch (error) {
     console.error('❌ ОШИБКА ПРИ ВЫПОЛНЕНИИ:', error);
   } finally {
-    mongoose.connection.close();
+    await db.close();
     process.exit();
   }
 };

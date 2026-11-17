@@ -155,6 +155,9 @@ const startCronJobs = () => {
     finally { accrualRunning = false; }
   });
 
+  // Служебная чистка (замена TTL-индексов Mongo)
+  cron.schedule('30 3 * * *', () => require('../db/cleanup').cleanup().catch(e => console.error('Cleanup Error:', e.message)));
+
   cron.schedule('* * * * *', async () => {
     if (expirationRunning) return;
     expirationRunning = true;

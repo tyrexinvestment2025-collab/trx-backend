@@ -1,14 +1,10 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-/** Ответ на «Вопрос дня»: один ответ в день на пользователя */
-const quizAnswerSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  date: { type: String, required: true }, // YYYY-MM-DD (UTC)
-  questionId: { type: String, required: true },
-  answer: { type: Number, required: true },
-  correct: { type: Boolean, required: true }
+/** Ответ на «Вопрос дня»: один ответ в день на пользователя (UNIQUE user_id, date) */
+module.exports = new Model('QuizAnswer', 'quiz_answers', {
+  userId: { type: 'ref', ref: 'User' },
+  date: { type: 'text' }, // YYYY-MM-DD (UTC)
+  questionId: { type: 'text' },
+  answer: { type: 'int' },
+  correct: { type: 'bool' },
 }, { timestamps: true });
-
-quizAnswerSchema.index({ userId: 1, date: 1 }, { unique: true });
-
-module.exports = mongoose.model('QuizAnswer', quizAnswerSchema);

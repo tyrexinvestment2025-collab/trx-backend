@@ -1,17 +1,15 @@
-const mongoose = require('mongoose');
+const { Model } = require('../db/model');
 
-const ExchangeOrderSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    cardId: { type: mongoose.Schema.Types.ObjectId, ref: 'UserCard' },
-    type: { type: String, enum: ['BUY', 'SELL'], required: true },
-    btcAmount: { type: Number, required: true },
-    appUsdAmount: { type: Number, required: true }, // Сколько списали с юзера
-    binanceUsdtAmount: { type: Number },           // Сколько реально ушло на Binance
-    executedPrice: { type: Number },               // Цена исполнения на бирже
-    binanceOrderId: { type: String },
-    status: { type: String, enum: ['SUCCESS', 'FAILED'], default: 'SUCCESS' },
-    errorLog: { type: String },
-    profitDelta: { type: Number }                   // Разница (доход/убыток на курсе)
+module.exports = new Model('ExchangeOrder', 'exchange_orders', {
+  userId: { type: 'ref', ref: 'User' },
+  cardId: { type: 'ref', ref: 'UserCard' },
+  type: { type: 'text' },                    // BUY | SELL
+  btcAmount: { type: 'double' },
+  appUsdAmount: { type: 'double' },          // Сколько списали с юзера
+  binanceUsdtAmount: { type: 'double' },     // Сколько реально ушло на Binance
+  executedPrice: { type: 'double' },         // Цена исполнения на бирже
+  binanceOrderId: { type: 'text' },
+  status: { type: 'text', default: 'SUCCESS' }, // SUCCESS | FAILED
+  errorLog: { type: 'text' },
+  profitDelta: { type: 'double' },           // Разница (доход/убыток на курсе)
 }, { timestamps: true });
-
-module.exports = mongoose.model('ExchangeOrder', ExchangeOrderSchema);

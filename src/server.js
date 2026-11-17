@@ -24,7 +24,6 @@ const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const referralRoutes = require('./routes/referralRoutes');
 
-connectDB();
 const app = express();
 
 // Создаем HTTP сервер для работы с сокетами
@@ -38,6 +37,14 @@ const io = new Server(server, {
 });
 
 app.use(express.json());
+// Короткий журнал запросов к API (REQUEST_LOG=true)
+if (process.env.REQUEST_LOG === 'true') {
+    app.use('/api', (req, res, next) => {
+        const t = Date.now();
+        res.on('finish', () => console.log(`[req] ${req.method} ${req.originalUrl.split('?')[0]} ${res.statusCode} ${Date.now() - t}ms`));
+        next();
+    });
+}
 app.use(express.urlencoded({ extended: true })); 
 app.use(cors()); 
 
@@ -49,12 +56,19 @@ app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/referrals', referralRoutes);
 app.use('/api/v1/analytics', analyticsRoutes);
 
-app.get('/', (req, res) => res.send('Tyrex API is running...'));
+// Собранный фронт (Mini App) с того же адреса, если задан FRONTEND_DIST — тогда VITE_API_URL=/api/v1
+if (process.env.FRONTEND_DIST) {
+    const dist = path.resolve(process.env.FRONTEND_DIST);
+    app.use(express.static(dist, { index: false, maxAge: '1h' }));
+    app.get(/^\/(?!api\/|static\/|socket\.io\/).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
+} else {
+    app.get('/', (req, res) => res.send('Tyrex API is running...'));
+}
 
+// Запуск фоновых задач — после подключения к базе и применения схемы
+connectDB().then(() => {
 // Telegram-бот: вебхук, очередь уведомлений, админ-чат
 require('./bot').initBot(app);
-
-// Запуск фоновых задач
 if (process.env.DISABLE_CRON !== 'true') {
     startCronJobs();
     startReferralJob();
@@ -78,7 +92,8 @@ io.on('connection', (socket) => {
 console.log(`[ENV] API_URL is set to: ${process.env.API_URL}`);
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+server.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     console.log(`🚀 Server on port ${PORT}`);
     console.log(`🔌 WebSockets active`);
+});
 });
